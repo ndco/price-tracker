@@ -1,0 +1,15 @@
+# Captured retailer pages. Not committed: they are someone else's page content,
+# they run to megabytes, they embed the store's own front-end access tokens,
+# and they go stale. Regenerate them with:
+#     bash test/capture-fixtures.sh
+fixtures/
+
+# Scratch
+_harness.html
+.DS_Store
+node_modules/
+
+# Local-only editor/agent config
+.claude/settings.local.json
+.claude/launch.json
+.claude/serve.js

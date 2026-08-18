@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Price Tracker</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header class="masthead">
+    <span class="brand">PRICE&middot;TRK</span>
+    <span class="masthead-right">
+      <span id="trackedBadge" class="tracked-badge" hidden>0 TRACKED</span>
+      <button id="checkNow" class="btn btn-outline" type="button">CHECK NOW</button>
+      <button id="openSettings" class="iconbtn" type="button"
+              title="Settings" aria-label="Settings">&#9881;</button>
+    </span>
+  </header>
+
+  <p id="subline" class="subline" hidden>
+    <span class="subline-counts">
+      <span id="atTargetCount" class="at-target">0 AT TARGET</span>
+      <span class="slash">/</span>
+      <span id="trackedCount" class="muted">0 TRACKED</span>
+    </span>
+    <span id="todayChange" class="today"></span>
+  </p>
+
+  <main id="body" class="body"></main>
+
+  <footer class="footbar">
+    <label class="interval">
+      <span class="eyebrow">INTERVAL</span>
+      <select id="interval" class="select">
+        <option value="30">30M</option>
+        <option value="60">1H</option>
+        <option value="180">3H</option>
+        <option value="360">6H</option>
+        <option value="720">12H</option>
+        <option value="1440">24H</option>
+      </select>
+    </label>
+    <span class="next">
+      <span class="eyebrow">NEXT</span>
+      <span id="nextIn" class="next-time">--:--</span>
+    </span>
+  </footer>
+
+  <script src="compute.js"></script>
+  <script src="store.js"></script>
+  <script src="ldparse.js"></script>
+  <script src="rules.js"></script>
+  <script src="adapters.js"></script>
+  <script src="chart.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

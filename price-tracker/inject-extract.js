@@ -1,0 +1,325 @@
+// Runs in the page context via chrome.scripting.executeScript({ files: [...] }),
+// and against fetched HTML through a DOMParser document. The completion value of
+// this IIFE is returned as injectionResults[0].result.
+//
+// Layers, first confident hit wins:
+//   1 JSON-LD, including offers nested in hasVariant / isVariantOf
+//   2 state blobs (__NEXT_DATA__ / __NUXT_DATA__ / __APOLLO_STATE__)
+//   3 meta tags and microdata
+//   4 a DOM heuristic, scoped to the product region so carousels can't win
+//
+// Every reading carries `via` (which layer), `conf` (high|medium|low) and `raw`
+// (the string we parsed), so a wrong reading can be traced and quarantined later.
+(() => {
+  const DOC = typeof __PT_DOC__ !== "undefined" ? __PT_DOC__ : document;
+  const HREF = typeof __PT_URL__ !== "undefined" ? __PT_URL__ : location.href;
+  // A document parsed from fetched HTML has no window, so it has no layout:
+  // every element would read as "hidden" and every style as empty. Visibility
+  // and strikethrough tests only mean something on a rendered page.
+  const VIEW = DOC && DOC.defaultView;
+  const LIVE = !!VIEW;
+  let PAGE;
+  try { PAGE = new URL(HREF); } catch (e) { PAGE = { pathname: "", searchParams: new URLSearchParams() }; }
+
+  // --- number parsing ---------------------------------------------------------
+  // Delegates to ldparse.js so the page path and the worker's fetch path share
+  // one parser. The fallback only matters if ldparse failed to inject, which
+  // the build check now prevents.
+  const MULTI = { allowMultiple: true };
+  function parsePrice(v, opts) {
+    if (LD) return LD.parsePrice(v, opts);
+    if (v == null) return null;
+    const m = String(v).replace(/[^\d.,]/g, "").match(/\d+(?:[.,]\d{1,2})?/);
+    const n = m ? parseFloat(m[0].replace(",", ".")) : NaN;
+    return Number.isFinite(n) ? n : null;
+  }
+
+  const str = (v) => (v == null ? "" : String(v)).trim();
+
+  // --- JSON-LD ----------------------------------------------------------------
+  // Offer collection and variant scoring live in ldparse.js so the service
+  // worker's fetch path runs the identical logic without a DOM. That file is
+  // injected alongside this one.
+  const LD = typeof PTLd !== "undefined" ? PTLd : null;
+
+  function fromJsonLd() {
+    if (!LD) return null;
+    const texts = [];
+    for (const b of DOC.querySelectorAll('script[type="application/ld+json"]')) {
+      texts.push(b.textContent);
+    }
+    const all = LD.offersFrom(texts, DOC.title);
+    const c = LD.pickForPage(all, HREF, canonicalUrl());
+    if (!c) return null;
+    return Object.assign({}, c, {
+      via: all.length > 1 ? "jsonld-variant" : "jsonld",
+      candidates: all.length
+    });
+  }
+
+  // --- state blobs ------------------------------------------------------------
+  // Nuxt/Next/Apollo apps often ship the price in a JSON island even when the
+  // markup is built client-side. We only trust a blob when a single plausible
+  // price key is present, so this never becomes a guessing game.
+  function fromStateBlob() {
+    const ids = ["__NEXT_DATA__", "__NUXT_DATA__"];
+    for (const id of ids) {
+      const el = DOC.getElementById(id);
+      if (!el || !el.textContent) continue;
+      let data;
+      try { data = JSON.parse(el.textContent); } catch (e) { continue; }
+      const hit = findPriceIn(data);
+      if (hit) return { price: hit.price, raw: String(hit.raw), list: hit.list, currency: hit.currency || "",
+                        title: DOC.title, image: "", stock: "", sku: "", color: "", size: "",
+                        via: "state-blob", conf: "medium", candidates: 1 };
+    }
+    return null;
+  }
+
+  // Look for an object that carries a price alongside a currency, which is a
+  // much stronger signal than a bare number called "price".
+  function findPriceIn(root) {
+    const stack = [root];
+    let guard = 0;
+    while (stack.length && guard++ < 20000) {
+      const n = stack.shift();
+      if (!n || typeof n !== "object") continue;
+      if (Array.isArray(n)) { for (const v of n) if (v && typeof v === "object") stack.push(v); continue; }
+      const keys = Object.keys(n);
+      const cur = n.currency || n.currencyCode || n.priceCurrency;
+      const amount = n.price != null ? n.price : (n.amount != null ? n.amount : n.value);
+      if (cur && amount != null) {
+        const p = parsePrice(amount, MULTI);
+        if (p != null && p > 0) {
+          const list = parsePrice(n.compareAtPrice || n.listPrice || n.was || n.originalPrice, MULTI);
+          return { price: p, raw: amount, currency: String(cur), list: list && list > p ? list : null };
+        }
+      }
+      for (const k of keys) { const v = n[k]; if (v && typeof v === "object") stack.push(v); }
+    }
+    return null;
+  }
+
+  // --- meta / microdata -------------------------------------------------------
+  function metaContent(sel) {
+    const el = DOC.querySelector(sel);
+    return (el && (el.content || el.getAttribute("content"))) || "";
+  }
+
+  function fromMeta() {
+    const sel = [
+      'meta[property="product:price:amount"]',
+      'meta[property="og:price:amount"]',
+      'meta[itemprop="price"]'
+    ];
+    for (const s of sel) {
+      const raw = metaContent(s);
+      const price = parsePrice(raw, MULTI);
+      if (price != null && price > 0) {
+        return { price, raw: str(raw), list: null,
+          currency: metaContent('meta[property="product:price:currency"]') ||
+                    metaContent('meta[property="og:price:currency"]') || "",
+          title: DOC.title, image: "", stock: "", sku: "", color: "", size: "",
+          via: "meta", conf: "medium", candidates: 1 };
+      }
+    }
+    return null;
+  }
+
+  function fromItemprop() {
+    const el = DOC.querySelector('[itemprop="price"]');
+    if (!el) return null;
+    const raw = el.getAttribute("content") || el.textContent;
+    const price = parsePrice(raw, MULTI);
+    if (price == null || price <= 0) return null;
+    return { price, raw: str(raw), list: null, currency: "", title: DOC.title,
+      image: "", stock: "", sku: "", color: "", size: "",
+      via: "microdata", conf: "medium", candidates: 1 };
+  }
+
+  // --- scoped DOM heuristic ---------------------------------------------------
+  const NOISE_RE = /you may also like|recommend|related|similar|complete the look|customers also|pairs with|more from|recently viewed|others bought|you might|trending|bestseller/i;
+
+  function isNoise(el) {
+    for (let n = el, hops = 0; n && hops < 12; n = n.parentElement, hops++) {
+      const label = ((n.getAttribute && (n.getAttribute("aria-label") || n.getAttribute("data-testid"))) || "") +
+                    " " + (n.className || "") + " " + (n.id || "");
+      if (NOISE_RE.test(String(label))) return true;
+      // A heading inside the section names it.
+      if (n.querySelector) {
+        const head = n.querySelector(":scope > h2, :scope > h3, :scope > header h2");
+        if (head && NOISE_RE.test(head.textContent || "")) return true;
+      }
+    }
+    return false;
+  }
+
+  const PRICE_SEL = '[class*="price" i],[id*="price" i]';
+  // Above this, an ancestor has stopped being "the product" and has started
+  // being "the page": on.com's fifth ancestor from the title held 58 price
+  // nodes, nearly all of them accessories in a carousel.
+  const CROWDED = 6;
+
+  // Narrow the search to the region that describes THIS product. Climbs from
+  // the title until prices appear, then stops before the branch turns into the
+  // whole page.
+  function productRoot() {
+    const typed = DOC.querySelector('[itemtype*="Product" i]');
+    if (typed) return typed;
+
+    const h1 = DOC.querySelector("h1");
+    if (h1) {
+      let best = null;
+      for (let n = h1.parentElement, hops = 0; n && hops < 8; n = n.parentElement, hops++) {
+        const found = n.querySelectorAll(PRICE_SEL).length;
+        if (!found) continue;
+        // The first ancestor that sees any price is the tightest useful scope.
+        if (!best) best = n;
+        // Keep widening only while the neighbourhood stays small enough to be
+        // about one product; the moment it balloons, keep what we had.
+        if (found > CROWDED) break;
+        best = n;
+      }
+      if (best) return best;
+    }
+    return DOC.querySelector("main") || DOC.body || DOC;
+  }
+
+  // How far apart two nodes sit in the tree. The real price is a near neighbour
+  // of the product title; a carousel price is many hops away through a shared
+  // ancestor. Cheapness says nothing — the cheapest thing on a shoe page is a
+  // sock — so distance is the signal we rank on.
+  function hopsBetween(a, b) {
+    if (!a || !b) return 99;
+    const chain = [];
+    for (let n = a, i = 0; n && i < 40; n = n.parentElement, i++) chain.push(n);
+    for (let n = b, down = 0; n && down < 40; n = n.parentElement, down++) {
+      const up = chain.indexOf(n);
+      if (up >= 0) return up + down;
+    }
+    return 99;
+  }
+
+  const ORIGINAL_RE = /was|original|list|msrp|regular|compare|strike|through|retail|old|before/i;
+  const SALE_RE = /sale|now|current|final|deal|reduced|special/i;
+  // Either a currency marker, or an amount written with cents. A bare integer
+  // in a "price"-ish container is far more often a size, a capacity or a count.
+  const MONEY_TEXT_RE = /[$€£¥₹₩]|\b(?:USD|EUR|GBP|CAD|AUD|NZD|JPY|INR|KRW)\b|\d[.,]\d{2}(?!\d)/i;
+  const EXCLUDE_RE = /save|off\b|shipping|coupon|each|per\s|\/\s*(mo|month|yr|year)|installment|afterpay|klarna|affirm/i;
+
+  // A category, search or collection page is full of prices, none of which is
+  // "this page's price". Tier 1 already refuses when many offers exist and none
+  // claims the page; this stops the DOM scan from stepping in and picking one
+  // anyway. Structured evidence decides, and the URL only reinforces it — some
+  // product pages carry no id in the path at all.
+  function looksLikeShelf() {
+    if (!LD) return false;
+    const texts = [];
+    for (const b of DOC.querySelectorAll('script[type="application/ld+json"]')) texts.push(b.textContent);
+
+    const offers = LD.offersFrom(texts, "");
+    // Something on the page claims to be the page's own product: not a shelf.
+    if (offers.length && LD.pickForPage(offers, HREF, canonicalUrl())) return false;
+    // Exactly one offer is one product, whatever else the page carries.
+    if (offers.length === 1) return false;
+
+    // Declared as a collection, and nothing claimed the page. Note a listing's
+    // products often hang off ItemList.itemListElement, which we do not walk,
+    // so this fires with zero offers found as readily as with many.
+    if (LD.hasListingType(texts)) return true;
+    // Several unclaimed offers is a shelf regardless of what it calls itself.
+    if (offers.length > 3) return true;
+    // Nothing structured to go on — fall back to the shape of the address.
+    if (!offers.length && LD.urlLooksLikeListing(HREF)) return true;
+    return false;
+  }
+
+  function fromHeuristic() {
+    if (looksLikeShelf()) return null;
+    const root = productRoot();
+    const anchor = DOC.querySelector("h1") || root;
+    const nodes = root.querySelectorAll(PRICE_SEL);
+    const cands = [];
+    for (const el of nodes) {
+      if (LIVE && el.offsetParent === null &&
+          (!el.getClientRects || el.getClientRects().length === 0)) continue;
+      if (isNoise(el)) continue;
+      const txt = (el.textContent || "").trim();
+      if (!txt || !/\d/.test(txt) || txt.length > 120) continue;
+      if (EXCLUDE_RE.test(txt)) continue;
+      // A class merely containing "price" proves nothing — Newegg's capacity
+      // buttons carry `price-padding` and read "1TB", which is a 1 to a naive
+      // parser. Text that claims to be money has to look like money.
+      if (!MONEY_TEXT_RE.test(txt)) continue;
+      const price = parsePrice(txt);
+      if (price == null || price <= 0) continue;
+      const key = String((el.className || "") + " " + (el.id || ""));
+      let struck = false;
+      if (LIVE) {
+        try {
+          struck = String(VIEW.getComputedStyle(el).textDecorationLine || "").includes("line-through");
+        } catch (e) {}
+      } else {
+        // No layout to consult, so fall back to what the markup declares.
+        const style = el.getAttribute && el.getAttribute("style");
+        struck = !!style && /line-through/i.test(style);
+      }
+      cands.push({ price, raw: txt.slice(0, 40), original: struck || ORIGINAL_RE.test(key),
+                   sale: SALE_RE.test(key), hops: hopsBetween(anchor, el) });
+    }
+    if (!cands.length) return null;
+
+    // Nearest to the product title wins; among equally near candidates, one
+    // explicitly marked as the sale price wins, then the lower number.
+    const byNearness = (a, b) => a.hops - b.hops ||
+      (b.sale ? 1 : 0) - (a.sale ? 1 : 0) || a.price - b.price;
+    const pool = cands.filter((c) => !c.original);
+    const chosen = (pool.length ? pool : cands).slice().sort(byNearness)[0];
+    // The struck-through original belongs to the same corner of the page as
+    // the price we picked, so rank it the same way.
+    const listed = cands.filter((c) => c.original && c.price > chosen.price)
+      .sort((a, b) => a.hops - b.hops || a.price - b.price)[0];
+
+    // Being clearly the closest candidate is the evidence. A tie at the same
+    // distance means several prices sit equally near the title and we are back
+    // to guessing, which the caller should treat as unproven.
+    const rivals = pool.filter((c) => c.hops === chosen.hops && c.price !== chosen.price);
+    const conf = rivals.length === 0 ? "medium" : "low";
+
+    return { price: chosen.price, raw: chosen.raw, list: listed ? listed.price : null,
+      currency: "", title: DOC.title, image: "", stock: "", sku: "", color: "", size: "",
+      via: "heuristic", conf, candidates: cands.length };
+  }
+
+  // --- assemble ---------------------------------------------------------------
+  function canonicalUrl() {
+    const el = DOC.querySelector('link[rel="canonical"]');
+    const href = el && el.getAttribute("href");
+    if (!href) return HREF;
+    try { return new URL(href, PAGE.origin || undefined).href; } catch (e) { return HREF; }
+  }
+
+  const found = fromJsonLd() || fromStateBlob() || fromMeta() || fromItemprop() || fromHeuristic();
+  if (!found) return null;
+
+  let host = "";
+  try { host = new URL(HREF).hostname.replace(/^www\./, ""); } catch (e) {}
+
+  return {
+    price: found.price,
+    list: found.list != null ? found.list : null,
+    currency: found.currency || metaContent('meta[property="product:price:currency"]') || "",
+    title: found.title || DOC.title,
+    image: found.image || metaContent('meta[property="og:image"]') || "",
+    stock: found.stock || "",
+    sku: found.sku || "",
+    color: found.color || "",
+    size: found.size || "",
+    seller: host,
+    canonical: canonicalUrl(),
+    via: found.via,
+    conf: found.conf,
+    raw: found.raw || "",
+    candidates: found.candidates || 1
+  };
+})();
