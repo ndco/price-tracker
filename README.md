@@ -5,6 +5,11 @@ drop. Everything stays on your machine: no account, no server, no analytics.
 
 ![version](https://img.shields.io/badge/version-1.0.0-1F7A4D)
 ![manifest](https://img.shields.io/badge/manifest-v3-1C1E1B)
+![chrome](https://img.shields.io/badge/chrome-110%2B-A4661A)
+
+**Status:** v1.0.0, feature complete, 118 tests passing against real captured
+product pages. Not yet submitted to the Chrome Web Store — the listing copy and
+privacy policy are written and waiting in [`docs/`](docs/).
 
 ## What it does
 
@@ -16,11 +21,19 @@ drop. Everything stays on your machine: no account, no server, no analytics.
 
 ## Install
 
-Not on the Chrome Web Store yet. To run it:
+Not on the Chrome Web Store yet, so load it yourself:
+
+```bash
+git clone https://github.com/ndco/price-tracker.git
+```
 
 1. Open `chrome://extensions`
 2. Turn on **Developer mode**
-3. **Load unpacked** → select the `price-tracker/` folder
+3. **Load unpacked** → select the **`price-tracker/`** folder inside the clone
+
+Point Chrome at `price-tracker/`, not the repository root. The extension is kept
+in its own folder so the tests, docs and captured pages never end up inside the
+packaged build — `node test/run.js` fails if anything strays in there.
 
 Requires Chrome 110 or newer.
 
@@ -59,7 +72,8 @@ Nothing fails silently: a stalled item says `CAN'T CHECK`, `CAN'T VERIFY`, or
 ## Layout
 
 ```
-price-tracker/     the extension (this is what you load)
+price-tracker/     the extension — this folder is what Chrome loads, and what
+                   gets zipped for the store; nothing else ships
   manifest.json
   background.js    service worker: scheduling, checks, alerts, badge
   inject-extract.js  runs in the page; the 5-layer cascade
