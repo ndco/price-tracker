@@ -5,11 +5,8 @@
 fixtures/
 
 # Scratch
-_harness.html
 .DS_Store
 node_modules/
 
-# Local-only editor/agent config
+# Local-only, per-machine
 .claude/settings.local.json
-.claude/launch.json
-.claude/serve.js

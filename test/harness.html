@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Price Tracker — popup harness</title>
+<link rel="stylesheet" href="/price-tracker/popup.css" />
+<style>
+  /* The popup fixes its own size; this only frames it on the page. */
+  html { background: #cfccc3; }
+  body { margin: 0 auto; border: 1px solid rgba(0,0,0,.25); }
+  #modes {
+    position: fixed; top: 8px; left: 8px; z-index: 99;
+    font: 11px/1.6 ui-monospace, Menlo, monospace; color: #1C1E1B;
+  }
+  #modes a { display: block; color: #1F7A4D; text-decoration: none; }
+  #modes a:hover { text-decoration: underline; }
+  #modes b { display: block; margin-bottom: 3px; color: #6b7480; font-weight: 400; }
+</style>
+</head>
+<body>
+
+<!--
+  Runs the real popup against a stubbed chrome.* so every screen can be looked
+  at without loading the extension. Pick a state with ?mode=
+
+    node test/serve.js     then open  http://localhost:8731/test/harness.html
+
+  This file is committed on purpose. It was rebuilt from scratch fifteen times
+  during the original build before anyone noticed it was infrastructure.
+-->
+
+<nav id="modes"><b>mode</b></nav>
+
+<header class="masthead">
+  <span class="brand">PRICE&middot;TRK</span>
+  <span class="masthead-right">
+    <span id="trackedBadge" class="tracked-badge" hidden>0 TRACKED</span>
+    <button id="checkNow" class="btn btn-outline" type="button">CHECK NOW</button>
+    <button id="openSettings" class="iconbtn" type="button" aria-label="Settings">&#9881;</button>
+  </span>
+</header>
+
+<p id="subline" class="subline" hidden>
+  <span class="subline-counts">
+    <span id="atTargetCount" class="at-target">0 AT TARGET</span>
+    <span class="slash">/</span>
+    <span id="trackedCount" class="muted">0 TRACKED</span>
+  </span>
+  <span id="todayChange" class="today"></span>
+</p>
+
+<main id="body" class="body"></main>
+
+<footer class="footbar">
+  <label class="interval">
+    <span class="eyebrow">INTERVAL</span>
+    <select id="interval" class="select">
+      <option value="30">30M</option><option value="60">1H</option>
+      <option value="180">3H</option><option value="360">6H</option>
+      <option value="720">12H</option><option value="1440">24H</option>
+    </select>
+  </label>
+  <span class="next"><span class="eyebrow">NEXT</span>
+    <span id="nextIn" class="next-time">--:--</span></span>
+</footer>
+
+<script>
+const MODE = new URL(location.href).searchParams.get("mode") || "list";
+const MODES = ["list", "empty", "noprice", "guards", "soldout", "lowconf"];
+document.getElementById("modes").insertAdjacentHTML("beforeend",
+  MODES.map(m => `<a href="?mode=${m}"${m === MODE ? ' style="font-weight:700"' : ""}>${m}</a>`).join(""));
+
+const NOW = Date.now(), D = 864e5;
+const hist = (pts) => pts.map(([d, p]) => ({ t: NOW - d * D, price: p }));
+
+// A watchlist covering the row states worth looking at.
+const LIST = [
+  { title: "Allbirds Wool Runner", url: "https://allbirds.com/products/wool-runner",
+    seller: "allbirds.com", currency: "USD", list: 110, target: 60, addedPrice: 110,
+    lastPrice: 55, stock: "in", history: hist([[100,110],[60,95],[40,79],[0,55]]),
+    createdAt: NOW - 100*D },
+  { title: "Sony WH-1000XM5", url: "https://sony.com/p/xm5", seller: "sony.com",
+    currency: "USD", list: 399, target: 300, addedPrice: 349, lastPrice: 328, stock: "in",
+    history: hist([[30,349],[15,340],[0,328]]), createdAt: NOW - 30*D },
+  { title: "Barbour Bedale Jacket", url: "https://barbour.com/p/bedale", seller: "barbour.com",
+    currency: "USD", list: 340, target: null, addedPrice: 340, lastPrice: 289, stock: "in",
+    history: hist([[20,340],[0,289]]), createdAt: NOW - 20*D },
+  { title: "Brand New Item", url: "https://shop.test/p/new", seller: "shop.test",
+    currency: "USD", list: 200, target: null, addedPrice: 189, lastPrice: 189, stock: "in",
+    history: hist([[0,189]]), createdAt: NOW - 60000 }
+];
+
+// The states that only appear when a check goes wrong.
+const GUARDS = [
+  { title: "Cloud Sky Black Eclipse", url: "https://on.com/p/cloud-sky", seller: "on.com",
+    currency: "USD", list: 110, target: 70, addedPrice: 75, lastPrice: 75, stock: "in",
+    history: hist([[20,110],[0,75]]), createdAt: NOW - 20*D, fpColor: "Black | Eclipse",
+    identityMismatch: 'color is "Dustrose | Terra", you tracked "Black | Eclipse"',
+    lastOk: NOW - 3*D },
+  { title: "Sony WH-1000XM5", url: "https://sony.com/p/xm5", seller: "sony.com",
+    currency: "USD", list: 399, target: 300, addedPrice: 349, lastPrice: 349, stock: "in",
+    history: hist([[30,349]]), createdAt: NOW - 30*D, pendingPrice: 12.99,
+    pendingSince: NOW - 36e5, suspect: "price moved 96% — confirming before recording" },
+  { title: "Nordstrom Barbour", url: "https://nordstromrack.com/s/barbour/8953182",
+    seller: "nordstromrack.com", currency: "USD", list: null, target: 250, addedPrice: 349,
+    lastPrice: 349, stock: "", history: hist([[10,349]]), createdAt: NOW - 10*D,
+    failCount: 3, lastError: "no price found on the page", lastOk: NOW - 4*D },
+  { title: "Patagonia Nano Puff", url: "https://patagonia.com/p/nano", seller: "patagonia.com",
+    currency: "USD", list: 199, target: 140, addedPrice: 199, lastPrice: 148, stock: "in",
+    history: hist([[40,199],[0,148]]), createdAt: NOW - 40*D,
+    snoozeUntil: NOW + 26*D, snoozeKind: "30" }
+];
+
+// What the extractor returns for the tab the user is looking at.
+const READINGS = {
+  list:    { price: 55, list: 110, currency: "USD", title: "Allbirds Wool Runner",
+             image: "", stock: "in", sku: "A11599M090", color: "Medium Grey", size: "9",
+             seller: "allbirds.com", canonical: "https://allbirds.com/products/wool-runner",
+             via: "jsonld", conf: "high", raw: "55", candidates: 1,
+             url: "https://allbirds.com/products/wool-runner" },
+  lowconf: { price: 75, list: 110, currency: "USD", title: "Cloud Sky Black | Eclipse",
+             image: "", stock: "", sku: "", color: "", size: "",
+             seller: "on.com", canonical: "https://on.com/p/cloud-sky",
+             via: "heuristic", conf: "low", raw: "$75.00", candidates: 12,
+             url: "https://on.com/p/cloud-sky" },
+  soldout: { price: 229.97, list: null, currency: "USD",
+             title: "Barbour Oversize Peached Bedale Casual Jacket", image: "", stock: "out",
+             sku: "8953182", color: "Light Brown", size: "", seller: "nordstromrack.com",
+             canonical: "https://nordstromrack.com/s/barbour/8953182",
+             via: "jsonld", conf: "high", raw: "229.97", candidates: 1,
+             url: "https://nordstromrack.com/s/barbour/8953182" }
+};
+
+const SEED = { list: LIST, empty: [], noprice: LIST.slice(0, 1), guards: GUARDS,
+               soldout: [], lowconf: [] }[MODE] || LIST;
+
+// A page with no readable price (mode=noprice, soldout) exercises screen 09.
+const TAB_READING = MODE === "noprice" || MODE === "soldout" ? null
+  : READINGS[MODE] || READINGS.list;
+// What the worker returns when a pasted link is read.
+const PEEK = READINGS[MODE === "soldout" ? "soldout" : "list"];
+
+const mem = { settings: { intervalMinutes: 60, showSparklines: true } };
+const changed = [];
+
+window.chrome = {
+  storage: {
+    local: {
+      get: async (k) => { const ks = Array.isArray(k) ? k : [k]; const o = {};
+                          ks.forEach((x) => (o[x] = mem[x])); return o; },
+      set: async (o) => { const c = {}; for (const k in o) c[k] = { newValue: o[k], oldValue: mem[k] };
+                          Object.assign(mem, o); changed.forEach((f) => f(c, "local")); }
+    },
+    onChanged: { addListener: (f) => changed.push(f) }
+  },
+  tabs: {
+    query: async () => [{ id: 1, url: (TAB_READING && TAB_READING.url) || "https://shop.test/c/all",
+                          title: (TAB_READING && TAB_READING.title) || "Category" }],
+    create: async () => ({ id: 2 })
+  },
+  scripting: { executeScript: async () => [{ result: TAB_READING }] },
+  runtime: {
+    getManifest: () => ({ version: "1.0.0" }),
+    sendMessage: async (m) => {
+      if (m.type === "nextCheck") return { ok: true, scheduledTime: Date.now() + 288e4 };
+      if (m.type === "peek") return { ok: true, reading: PEEK };
+      return { ok: true };
+    },
+    lastError: null
+  },
+  action: { setBadgeText: async () => {}, setBadgeBackgroundColor: async () => {},
+            setBadgeTextColor: async () => {} },
+  downloads: { download: async () => 1 }
+};
+</script>
+
+<script src="/price-tracker/compute.js"></script>
+<script src="/price-tracker/store.js"></script>
+<script src="/price-tracker/ldparse.js"></script>
+<script src="/price-tracker/rules.js"></script>
+<script src="/price-tracker/adapters.js"></script>
+<script src="/price-tracker/chart.js"></script>
+<script>
+  // Seed through the real normalizer so fixtures are always schema-correct.
+  mem.items = SEED.map((s) => Store.normalizeItem(Object.assign({ canonical: s.url }, s)));
+</script>
+<script src="/price-tracker/popup.js"></script>
+</body>
+</html>

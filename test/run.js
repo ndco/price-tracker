@@ -67,7 +67,9 @@ for (const f of ["popup.js", "background.js"]) {
 
 // --- 3. nothing ships that should not ---------------------------------------
 head("Bundle");
-const SHOULD_NOT_SHIP = /^(_|DESIGN-SPEC|.*\.test\.|fixtures?$)/;
+// Anything in price-tracker/ ends up in the store package. Markdown is the
+// easy mistake — a CLAUDE.md or README dropped in there ships to every user.
+const SHOULD_NOT_SHIP = /^(_|.*\.md$|.*\.test\.|fixtures?$|test$|docs$|node_modules$)/i;
 const strays = fs.readdirSync(EXT).filter((f) => SHOULD_NOT_SHIP.test(f));
 strays.length
   ? bad("would ship: " + strays.join(", "))
