@@ -52,13 +52,32 @@
     await chrome.storage.local.set({ [KEY]: learned });
   }
 
-  // Remember what worked. `needsTab` is sticky in one direction only: once a
-  // domain has needed a rendered page we keep paying for it, because the cheap
-  // path failing is the expensive thing to discover.
+  // Remember what worked. A success ends the failure streak: the count exists
+  // to escalate a site that is refusing us, and a site that just answered is
+  // not refusing us. Leaving it to accumulate turned one bad afternoon into a
+  // permanent verdict on the domain.
+  //
+  // `needsTab` still leans sticky — the cheap path failing is the expensive
+  // thing to discover — but it is no longer a one-way door. Proof that the
+  // cheap path works now beats the memory that it once did not.
   async function recordSuccess(url, reading, usedTab) {
-    const patch = { strategy: reading.via, lastOk: Date.now() };
+    const patch = { strategy: reading.via, lastOk: Date.now(), fails: 0 };
     if (usedTab) patch.needsTab = true;
+    else patch.needsTab = false;
     return set(url, patch);
+  }
+
+  // How long a `needsTab` verdict stands before the cheap path earns one more
+  // try. Sites get rebuilt, and a store that went server-rendered should not
+  // cost us a tab forever because of how it looked last month.
+  const REPROBE_AFTER = 7 * 24 * 60 * 60 * 1000;
+
+  // Is the expensive path still justified, or is this verdict stale enough to
+  // re-test? A blocker is a standing refusal, not a stale observation.
+  function shouldRetryCheapPath(rule) {
+    if (!rule || !rule.needsTab || rule.knownBlocker) return false;
+    const last = rule.lastFail || rule.updatedAt || 0;
+    return !last || Date.now() - last > REPROBE_AFTER;
   }
 
   // Counting failures is only useful if the count changes what we do. After
@@ -99,6 +118,7 @@
     return reading;
   }
 
-  root.Rules = { KEY, BUILT_IN, GIVE_UP_ON_FETCH, hostOf, all, forUrl, set, clear,
-                 recordSuccess, recordFailure, learnCorrection, applyDistrust };
+  root.Rules = { KEY, BUILT_IN, GIVE_UP_ON_FETCH, REPROBE_AFTER, hostOf, all, forUrl, set, clear,
+                 recordSuccess, recordFailure, learnCorrection, applyDistrust,
+                 shouldRetryCheapPath };
 })(typeof self !== "undefined" ? self : globalThis);

@@ -1169,8 +1169,13 @@ function detailScreen() {
   // Whatever is holding this item back, say so here rather than leaving the
   // detail screen looking like a live item that simply never updates.
   if ((item.failCount || 0) >= Store.MAX_FAILS) {
+    // Stopping is a judgement about the site, not a life sentence for the item.
+    // Without a way back, a site that was briefly unreachable left the row dead
+    // and the only cure was deleting and re-adding it.
     wrap.appendChild(h("p", "paused-note warn-note",
       `CHECKS STOPPED AFTER ${Store.MAX_FAILS} FAILURES — ${escapeHtml(item.lastError || "the site refused us")}.`));
+    wrap.appendChild(h("div", "row-actions",
+      `<button class="btn btn-outline" type="button" data-act="retry-item">TRY AGAIN</button>`));
   } else if (item.identityMismatch) {
     wrap.appendChild(h("p", "paused-note warn-note",
       `CAN'T VERIFY — ${escapeHtml(item.identityMismatch)}. NOTHING RECORDED WHILE THE PAGE SHOWS A DIFFERENT ITEM.`));
@@ -1674,6 +1679,20 @@ async function resumeItem(id) {
   render();
 }
 
+// Clear the failure streak, then check this one item straight away. Clearing
+// first is what makes the check happen at all: `isCheckable` refuses an item
+// that has already given up, so a retry that left the count alone would be a
+// button that did nothing.
+async function retryItem(id, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = "CHECKING…"; }
+  await Store.updateItem(id, { failCount: 0, lastError: "" });
+  try {
+    await chrome.runtime.sendMessage({ type: "checkOne", id });
+  } catch (e) { /* worker asleep — the reload below still shows the cleared state */ }
+  await reload();
+  render();
+}
+
 async function deleteItem(id) {
   // Remember it before it goes, so UNDO can put it back where it was.
   const index = state.items.findIndex((i) => i.id === id);
@@ -1879,6 +1898,7 @@ async function onBodyClick(e) {
     render();
     return;
   }
+  if (act === "retry-item") return retryItem(state.screen.id, btn);
 
   // --- screen 01 -------------------------------------------------------------
   if (act === "track") {

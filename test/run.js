@@ -65,6 +65,47 @@ for (const f of ["popup.js", "background.js"]) {
     : bad(f + " — injects inject-extract.js but never ldparse.js (JSON-LD layer would be dead)");
 }
 
+// --- 2c. every message the worker answers has someone asking ----------------
+// `checkOne` shipped with a handler, a message type, and no caller anywhere.
+// Nothing failed — the retry path simply did not exist, so an item that gave
+// up stayed given up. A handler with no sender is dead weight at best and a
+// missing feature at worst.
+head("Message wiring");
+{
+  const worker = fs.readFileSync(path.join(EXT, "background.js"), "utf8");
+  const senders = ["popup.js", "background.js"]
+    .map((f) => fs.readFileSync(path.join(EXT, f), "utf8")).join("\n");
+  const handled = new Set(
+    [...worker.matchAll(/msg\.type\s*===\s*"([^"]+)"/g)].map((m) => m[1]));
+  for (const type of handled) {
+    new RegExp('type:\\s*"' + type + '"').test(senders)
+      ? good(type + " — handled and sent")
+      : bad(type + " — the worker answers it, but nothing ever sends it");
+  }
+}
+
+// --- 2d. the tab loader does not trust the event stream alone ---------------
+// A tab starts loading before the worker can attach its onUpdated listener, so
+// a cached page reaches "complete" unobserved. Listening alone made every fast
+// page wait out the timeout and count as a failure; three of those retire the
+// item for good. The loader has to ask the tab where it got to as well.
+head("Tab load wiring");
+{
+  const worker = fs.readFileSync(path.join(EXT, "background.js"), "utf8");
+  const fn = /function waitForComplete[\s\S]*?\n}/.exec(worker);
+  if (!fn) {
+    bad("waitForComplete not found");
+  } else {
+    /chrome\.tabs\.get\s*\(/.test(fn[0])
+      ? good("waitForComplete reads the tab's current status")
+      : bad("waitForComplete only listens for onUpdated — a page that loaded " +
+            "before the listener attached will time out");
+  }
+  /if \(!loaded\) return \{ ok: false/.test(worker)
+    ? bad("readViaTab abandons the page on timeout instead of trying to read it")
+    : good("a load timeout still attempts extraction");
+}
+
 // --- 3. nothing ships that should not ---------------------------------------
 head("Bundle");
 // Anything in price-tracker/ ends up in the store package. Markdown is the

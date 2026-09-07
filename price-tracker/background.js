@@ -85,12 +85,20 @@ chrome.storage.onChanged.addListener((changes, area) => {
 });
 
 // --- price reading -----------------------------------------------------------
-function waitForComplete(tabId, timeoutMs = 20000) {
+// The tab starts loading the moment it is created, which is before this
+// listener can attach. A cached or fast page reaches "complete" inside that
+// gap and the event fires into a void — so ask the tab where it got to as
+// well as listening for where it goes next. Without the second half, every
+// fast page waited out the full timeout and was recorded as a failure.
+function waitForComplete(tabId, timeoutMs) {
+  const budget = timeoutMs == null ? 20000 : timeoutMs;
   return new Promise((resolve) => {
     let done = false;
+    let timer = null;
     const finish = (ok) => {
       if (done) return;
       done = true;
+      if (timer != null) clearTimeout(timer);
       chrome.tabs.onUpdated.removeListener(listener);
       resolve(ok);
     };
@@ -98,7 +106,13 @@ function waitForComplete(tabId, timeoutMs = 20000) {
       if (id === tabId && info.status === "complete") finish(true);
     };
     chrome.tabs.onUpdated.addListener(listener);
-    setTimeout(() => finish(false), timeoutMs);
+    timer = setTimeout(() => finish(false), budget);
+    // Listener first, then the status read: in that order a load that lands
+    // between the two is caught by the listener rather than missed by both.
+    Promise.resolve(chrome.tabs.get(tabId)).then(
+      (t) => { if (t && t.status === "complete") finish(true); },
+      () => {}
+    );
   });
 }
 
@@ -121,12 +135,15 @@ async function fetchHtml(url) {
 // Open the page in a background tab, run the full extractor, close the tab.
 // `ldparse.js` goes in first: the injected extractor reads it from the page's
 // isolated world, and both scripts share that world across the two calls.
-async function readViaTab(url) {
+async function readViaTab(url, timeoutMs) {
   let tab;
   try {
     tab = await chrome.tabs.create({ url, active: false });
-    const loaded = await waitForComplete(tab.id);
-    if (!loaded) return { ok: false, error: "timed out loading the page" };
+    // A page that never signals "complete" is still worth reading. Slow beacons
+    // and hung trackers hold the load event open long after the price is on
+    // screen, so a timeout downgrades the attempt rather than ending it — we
+    // only fail once the extractor has actually looked and found nothing.
+    const loaded = await waitForComplete(tab.id, timeoutMs);
     await sleep(1500); // let client-rendered prices settle
 
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["ldparse.js"] });
@@ -135,7 +152,9 @@ async function readViaTab(url) {
     });
     const reading = res && res.result ? res.result : null;
     if (!reading || reading.price == null) {
-      return { ok: false, error: "no price found on the page" };
+      return { ok: false, error: loaded
+        ? "no price found on the page"
+        : "the page did not finish loading, and no price was readable" };
     }
     return { ok: true, reading, usedTab: true };
   } catch (e) {
@@ -157,7 +176,8 @@ async function acquire(url) {
     if (s) return { ok: true, reading: withOrigin(s, url), usedTab: false };
   }
 
-  if (!rule.needsTab && !rule.knownBlocker) {
+  // A stale `needsTab` gets one cheap probe before we pay for a tab again.
+  if ((!rule.needsTab || Rules.shouldRetryCheapPath(rule)) && !rule.knownBlocker) {
     const html = await fetchHtml(url);
     if (html) {
       // Worth one probe: a Shopify store answers with variant-level data,
@@ -355,11 +375,21 @@ async function checkAll() {
   const due = items.filter(Store.isCheckable);
   let ok = 0, failed = 0;
 
+  // Write after every item, not once at the end. A single throw part-way
+  // through used to discard every reading the run had already earned, and a
+  // long watchlist gives it plenty of chances to throw.
   for (const item of due) {
-    const r = await checkItem(item, cfg);
-    if (r.ok) ok++; else failed++;
+    try {
+      const r = await checkItem(item, cfg);
+      if (r.ok) ok++; else failed++;
+    } catch (e) {
+      failed++;
+      item.lastChecked = Date.now();
+      item.lastError = (e && e.message) || "the check could not be completed";
+      item.failCount = (item.failCount || 0) + 1;
+    }
+    await Store.setItems(items);
   }
-  await Store.setItems(items);
   await updateBadge(items);
   return { checked: due.length, ok, failed, skipped: items.length - due.length };
 }

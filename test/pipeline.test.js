@@ -10,6 +10,11 @@ let tabsOpened = 0, fetches = [];
 let fetchImpl = async () => null;
 const notifs = [];
 
+const TAB_ID = 7;
+let tabLoadMode = "afterListener";
+let tabsById = {};
+const updateListeners = new Set();
+
 global.importScripts = (...files) => files.forEach((f) => require(DIR + f));
 
 global.chrome = {
@@ -27,11 +32,38 @@ global.chrome = {
                    onClicked: { addListener() {} }, onButtonClicked: { addListener() {} } },
   action: { setBadgeText: async () => {}, setBadgeBackgroundColor: async () => {},
             setBadgeTextColor: async () => {}, setIcon: async () => {} },
+  // A tab with a real load lifecycle. The old stub fired "complete" from
+  // inside addListener, so the page appeared to load *because* the worker
+  // started listening — which is the one guarantee Chrome does not give. That
+  // made the listener race structurally untestable, and it shipped.
+  //
+  // `tabLoadMode` decides when the page finishes relative to the worker
+  // attaching its listener:
+  //   "afterListener"  — the ordinary case, the event lands while we listen
+  //   "beforeListener" — a cached or fast page, already done at create time
+  //   "never"          — a page that hangs and never signals complete
   tabs: {
-    create: async () => { tabsOpened++; return { id: 7 }; },
-    remove: async () => {},
-    onUpdated: { addListener: (fn) => setTimeout(() => fn(7, { status: "complete" }), 1),
-                 removeListener() {} }
+    create: async ({ url }) => {
+      tabsOpened++;
+      const tab = { id: TAB_ID, url, status: "loading" };
+      tabsById[TAB_ID] = tab;
+      if (tabLoadMode === "beforeListener") {
+        // Done before the worker can possibly be listening, so no event fires.
+        tab.status = "complete";
+      } else if (tabLoadMode === "afterListener") {
+        setTimeout(() => {
+          tab.status = "complete";
+          for (const fn of updateListeners) fn(TAB_ID, { status: "complete" });
+        }, 1);
+      }
+      return tab;
+    },
+    get: async (id) => tabsById[id] || null,
+    remove: async (id) => { delete tabsById[id]; },
+    onUpdated: {
+      addListener: (fn) => updateListeners.add(fn),
+      removeListener: (fn) => updateListeners.delete(fn)
+    }
   },
   scripting: { executeScript: async () => [{ result: global.__TAB_READING__ || null }] },
   downloads: { download: async () => 1 }
@@ -64,6 +96,9 @@ function reset() {
   tabsOpened = 0; fetches = []; notifs.length = 0;
   global.__TAB_READING__ = null;
   fetchImpl = async () => null;
+  tabLoadMode = "afterListener";
+  tabsById = {};
+  updateListeners.clear();
 }
 
 (async () => {
@@ -200,6 +235,88 @@ function reset() {
   ok("alert says back in stock", /BACK IN STOCK/.test(notifs[0].title));
   ok("switched to price watching", item.watch === "price");
   ok("new price recorded", item.lastPrice === 199.97);
+
+  // ---- tab load wiring ------------------------------------------------------
+  // These are about ordering, not logic. Each one failed before the fix, and
+  // none of them could fail under the old stub.
+  section("tab load: a page that finished before we listened is still read");
+  reset();
+  tabLoadMode = "beforeListener";
+  global.__TAB_READING__ = { price: 42.5, currency: "USD", via: "jsonld", conf: "high",
+                             raw: "42.50", title: "Fast Page" };
+  item = Store.makeItem({ url: "https://shop.test/p/cached", title: "Fast Page", price: 42.5,
+    currency: "USD" }, null, { confirmed: true });
+  r = await checkItem(item);
+  ok("the read succeeded", r.ok === true);
+  ok("no failure recorded", item.failCount === 0);
+  ok("the price was stored", item.lastPrice === 42.5);
+
+  section("tab load: waitForComplete asks the tab, not only the event stream");
+  reset();
+  tabLoadMode = "beforeListener";
+  await chrome.tabs.create({ url: "https://shop.test/p/x", active: false });
+  ok("already-complete resolves without waiting", (await waitForComplete(TAB_ID, 40)) === true);
+
+  reset();
+  tabLoadMode = "never";
+  await chrome.tabs.create({ url: "https://shop.test/p/x", active: false });
+  ok("a hung page still times out", (await waitForComplete(TAB_ID, 40)) === false);
+
+  section("tab load: a timeout is not a verdict — the page is read anyway");
+  reset();
+  tabLoadMode = "never";
+  global.__TAB_READING__ = { price: 88, currency: "USD", via: "jsonld", conf: "high",
+                             raw: "88.00", title: "Slow Page" };
+  let slow = await readViaTab("https://shop.test/p/slow", 40);
+  ok("a price on a hung page is still returned", slow.ok === true && slow.reading.price === 88);
+
+  reset();
+  tabLoadMode = "never";
+  global.__TAB_READING__ = null;
+  slow = await readViaTab("https://shop.test/p/blank", 40);
+  ok("a hung page with no price still fails", slow.ok === false);
+  ok("and says why", /did not finish loading/.test(slow.error));
+
+  // ---- the ratchet ----------------------------------------------------------
+  section("recovery: a success ends the failure streak");
+  reset();
+  await Rules.set("https://shop.test/p/x", { fails: 2 });
+  await Rules.recordSuccess("https://shop.test/p/x",
+    { via: "jsonld", price: 1 }, false);
+  let rule = await Rules.forUrl("https://shop.test/p/x");
+  ok("fails reset to zero", rule.fails === 0);
+  ok("cheap-path success clears needsTab", rule.needsTab === false);
+
+  section("recovery: a stale needsTab earns one more cheap probe");
+  reset();
+  await Rules.set("https://shop.test/p/y",
+    { needsTab: true, lastFail: Date.now() - 8 * 24 * 3600 * 1000 });
+  rule = await Rules.forUrl("https://shop.test/p/y");
+  ok("a week-old verdict is retried", Rules.shouldRetryCheapPath(rule) === true);
+  await Rules.set("https://shop.test/p/z", { needsTab: true, lastFail: Date.now() });
+  rule = await Rules.forUrl("https://shop.test/p/z");
+  ok("a fresh verdict stands", Rules.shouldRetryCheapPath(rule) === false);
+  rule = await Rules.forUrl("https://www.nordstrom.com/s/x/1");
+  ok("a known blocker is never re-probed", Rules.shouldRetryCheapPath(rule) === false);
+
+  // ---- persistence ----------------------------------------------------------
+  section("checkAll: a throw part-way through does not discard earlier work");
+  reset();
+  global.__TAB_READING__ = { price: 10, currency: "USD", via: "jsonld", conf: "high",
+                             raw: "10.00", title: "A" };
+  const a = Store.makeItem({ url: "https://shop.test/p/a", title: "A", price: 10,
+    currency: "USD" }, null, { confirmed: true });
+  const b = Store.makeItem({ url: "https://shop.test/p/b", title: "B", price: 10,
+    currency: "USD" }, null, { confirmed: true });
+  b.history = null; // force checkItem to throw on the second item
+  Object.defineProperty(b, "history", {
+    get() { throw new Error("boom"); }, set() {}, configurable: true
+  });
+  await Store.setItems([a, b]);
+  await checkAll();
+  const saved = await Store.getItems();
+  ok("the first item was still written", saved[0].lastPrice === 10);
+  ok("the failing item was counted, not lost", saved.length === 2);
 
   console.log("\n" + pass + " passed, " + fail + " failed");
   process.exit(fail ? 1 : 0);
