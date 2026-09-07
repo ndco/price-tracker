@@ -108,7 +108,15 @@ const GUARDS = [
   { title: "Patagonia Nano Puff", url: "https://patagonia.com/p/nano", seller: "patagonia.com",
     currency: "USD", list: 199, target: 140, addedPrice: 199, lastPrice: 148, stock: "in",
     history: hist([[40,199],[0,148]]), createdAt: NOW - 40*D,
-    snoozeUntil: NOW + 26*D, snoozeKind: "30" }
+    snoozeUntil: NOW + 26*D, snoozeKind: "30" },
+  // A page that publishes several prices and never says which is its own. A
+  // second check reads the same ambiguous page, so this one does not resolve
+  // itself the way the CONFIRMING row above does — and says so.
+  { title: "REI Trailmade Rain Jacket", url: "https://rei.com/product/235244/trailmade",
+    seller: "rei.com", currency: "USD", list: null, target: 60, addedPrice: 79.95,
+    lastPrice: 79.95, stock: "in", history: hist([[12,79.95]]), createdAt: NOW - 12*D,
+    pendingPrice: 19.83, pendingKind: "unverified", pendingSince: NOW - 2*24*36e5,
+    suspect: "could not tell which number on the page is the price" }
 ];
 
 // What the extractor returns for the tab the user is looking at.

@@ -89,9 +89,11 @@ Marked ✅ covered, ⚠️ partly covered, ❌ not covered.
 | C5 | Category / shelf page — must refuse | fixture | ✅ |
 | C6 | Recommendation carousel must not win | fixture | ✅ |
 | C7 | Struck-through list price captured, not chosen | fixture | ✅ |
-| C8 | **Many variants, different prices, all sharing one URL** | — | ❌ **see G1** |
-| C9 | **Offers that are not product prices** (unit, installment) | — | ❌ **see G1** |
+| C8 | Many variants, different prices, all sharing one URL | extract + pipeline | ✅ |
+| C9 | Offers that are not product prices (unit, installment) | extract + pipeline | ✅ |
 | C10 | Page with no `class*="price"` anywhere | — | ❌ **see G2** |
+| C12 | Canonical names a different variant than the URL asked for | extract | ✅ |
+| C13 | Ambiguous variant page is not mistaken for a shelf | extract | ✅ |
 | C11 | Sold out; watched for return | pipeline | ✅ |
 
 ### D. Judgement — should this reading be believed
@@ -105,7 +107,8 @@ Marked ✅ covered, ⚠️ partly covered, ❌ not covered.
 | D5 | A real 70% clearance is delayed, not lost | pipeline | ✅ |
 | D6 | Currency switch is not a price change | pipeline | ✅ |
 | D7 | Identity mismatch stops the record | pipeline | ✅ |
-| D8 | **Low confidence agreeing with a wrong baseline** | — | ❌ **see G1** |
+| D8 | Low confidence agreeing with a wrong baseline | pipeline | ✅ |
+| D9 | A held reading says whether waiting will help | pipeline + harness | ✅ |
 
 ### E. Recovery — the ratchets
 
@@ -134,40 +137,41 @@ Run on 2026-09-07 against 20 live retail pages. Full method in
 `test/live-fetch.js`; the rendered-page findings were taken by driving a real
 browser.
 
-### G1 — A confidently wrong price, recorded silently 🔴
+### G1 — A confidently wrong price, recorded silently ✅ FIXED
 
 Three of the sites tested publish JSON-LD offers that are **not the product's
-price**, all carrying the page's own URL so nothing can tell them apart:
+price**, all carrying the page's own URL so scoring alone could not separate
+them. The old code picked the cheapest and called it low confidence:
 
-| Site | Offers | Prices published | Extractor picks | Page actually sells at |
-|---|---|---|---|---|
-| REI | 170 | 19.83 / 20.83 / 34.83 | **19.83** | $79.95 |
-| Backcountry | 42 | 169 / 118.30 | **118.30** | $169 (meta agrees) |
-| Sephora | 22 | 19.20 / 24 / 25 | **19.20** | $24–25 |
+| Site | Offers | Prices published | Was | Now | Page sells at |
+|---|---|---|---|---|---|
+| REI | 170 | 19.83 / 20.83 / 34.83 | 19.83 | **79.95**, from the page | $79.95 |
+| Backcountry | 42 | 169 / 118.30 | 118.30 | **169**, high conf | $169 |
+| Sephora | 22 | 19.20 / 24 / 25 | 19.20 | **24**, high conf | $24–25 |
 
-The reading is marked `conf: "low"`, so the gate holds it. That gate does not
-hold for long:
+Two changes, and a third that came out of them.
 
-```
-after add:      lastPrice=19.83  history=1
-check 1:        lastPrice=19.83  history=1  held=false  suspect=""
-check 2:        lastPrice=19.83  history=1  held=false  suspect=""
-```
+**Confidence now comes from corroboration.** One source naming a number is a
+claim; two independent sources naming the same number is evidence. When several
+offers claim the page and disagree about the money, `pickForPage` asks what the
+page says in its own voice — the price meta tag, or the money printed in the
+product region — and the offer that matches wins at high confidence. When
+nothing corroborates, it refuses, and the layer below gets its turn. That is
+how REI now reads $79.95: the JSON-LD stands down and the displayed price
+answers.
 
-`judge()` believes a low-confidence reading when it agrees with what we already
-had. A *consistently* wrong reading always agrees with itself, so it launders
-itself into history on the very next check. The row then shows no `CAN'T
-VERIFY`, no `CONFIRMING`, nothing — a tracked item that looks completely
-healthy and will never fire an alert.
+**Low confidence no longer establishes or confirms a price.** It used to be
+believed whenever it agreed with the previous reading, and a consistently wrong
+reading always agrees with itself. The row now says `CAN'T VERIFY` and records
+nothing, which is the honest report.
 
-This is the exact failure the product rule exists to prevent, and it is the
-highest-value thing to fix next.
-
-Worth testing as fixes: refuse rather than demote when tied offers disagree on
-price and nothing distinguishes them; prefer the `og:price:amount` meta tag
-when it disagrees with a tied-offer pick (it was right on Backcountry); and
-never let "agrees with the last reading" alone promote a low-confidence read
-that has *never* been corroborated by a stronger layer.
+**The canonical URL no longer outranks the address you are on.** on.com's
+canonical names the default variant, so asking for dustrose scored the
+black-eclipse variant just as highly, and the tie fell to whichever was
+cheaper. Canonical evidence still counts — a legacy handle redirects and only
+the canonical will match — it just counts for less than being asked for. That
+alone moved on.com's second variant from a low-confidence guess to a
+high-confidence read.
 
 ### G2 — The DOM heuristic cannot see modern storefronts 🟠
 

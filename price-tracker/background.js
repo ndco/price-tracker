@@ -218,18 +218,34 @@ function judge(item, reading) {
   const moved = prev != null && prev > 0 ? Math.abs(PT.pctChange(prev, reading.price) || 0) : 0;
   const confirmsPending = item.pendingPrice != null && item.pendingPrice === reading.price;
 
+  // Low confidence means we could not tell which number on the page was the
+  // price. A second look at the same page produces the same uncertainty, so
+  // agreement proves nothing — a consistently wrong reading always agrees with
+  // itself. That is exactly how $19.83 became the recorded price of a $79.95
+  // jacket: the reading matched what we already had, so it was believed, and
+  // what we already had came from the same weak source.
+  //
+  // So low confidence never establishes a price and never confirms one. It
+  // parks the number where the row can show it and says plainly that we cannot
+  // verify it. Only a stronger layer moves the item forward.
+  if (reading.conf === "low") {
+    return { hold: true, kind: "unverified",
+             reason: "could not tell which number on the page is the price" };
+  }
+
   if (moved > SANITY_PCT && !confirmsPending) {
-    return { hold: true, reason: "price moved " + Math.round(moved) + "% — confirming before recording" };
+    return { hold: true, kind: "confirming",
+             reason: "price moved " + Math.round(moved) + "% — confirming before recording" };
   }
   if (reading.conf === "high" || confirmsPending) return { hold: false };
   if (reading.conf === "medium") {
     // A modest move read by a decent-but-not-certain layer is believable.
     if (prev != null && moved <= 20) return { hold: false };
-    return { hold: true, reason: "read from a weaker source — confirming before recording" };
+    return { hold: true, kind: "confirming",
+             reason: "read from a weaker source — confirming before recording" };
   }
-  // Low confidence: only believable when it agrees with what we already had.
-  if (reading.price === prev) return { hold: false };
-  return { hold: true, reason: "could not identify the price with confidence" };
+  return { hold: true, kind: "unverified",
+           reason: "could not tell which number on the page is the price" };
 }
 
 async function checkItem(item, settings) {
@@ -278,10 +294,15 @@ async function checkItem(item, settings) {
     item.pendingPrice = reading.price;
     if (!item.pendingSince) item.pendingSince = now;
     item.suspect = verdict.reason;
-    return { changed: true, ok: true, held: true };
+    // Whether a second check can resolve this, or whether the page itself is
+    // the problem. The row says different things for the two, because
+    // "confirming" on something that will never confirm is a quiet lie.
+    item.pendingKind = verdict.kind || "confirming";
+    return { changed: true, ok: true, held: true, kind: item.pendingKind };
   }
   item.pendingPrice = null;
   item.pendingSince = 0;
+  item.pendingKind = "";
   item.suspect = "";
 
   const prevPrice = item.lastPrice;

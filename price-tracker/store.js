@@ -101,6 +101,10 @@
     // low-confidence read. It is not history until a second check agrees.
     it.pendingPrice = it.pendingPrice == null ? null : num(it.pendingPrice, null);
     it.pendingSince = num(it.pendingSince, 0);
+    // "confirming" — a second check can settle this. "unverified" — the page
+    // never told us which number is the price, so waiting will not help.
+    it.pendingKind = it.pendingKind === "unverified" ? "unverified"
+      : it.pendingPrice != null ? "confirming" : "";
     it.suspect = str(it.suspect);
 
     it.paused = !!it.paused;
