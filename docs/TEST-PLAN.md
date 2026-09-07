@@ -91,7 +91,10 @@ Marked ✅ covered, ⚠️ partly covered, ❌ not covered.
 | C7 | Struck-through list price captured, not chosen | fixture | ✅ |
 | C8 | Many variants, different prices, all sharing one URL | extract + pipeline | ✅ |
 | C9 | Offers that are not product prices (unit, installment) | extract + pipeline | ✅ |
-| C10 | Page with no `class*="price"` anywhere | — | ❌ **see G2** |
+| C10 | Page with no `class*="price"` anywhere | extract | ✅ |
+| C14 | Price split across spans plus a screen-reader copy | extract | ✅ |
+| C15 | Title too far from the price to anchor on | extract | ✅ |
+| C16 | Per-unit rate beside the real price | extract | ✅ |
 | C12 | Canonical names a different variant than the URL asked for | extract | ✅ |
 | C13 | Ambiguous variant page is not mistaken for a shelf | extract | ✅ |
 | C11 | Sold out; watched for return | pipeline | ✅ |
@@ -173,24 +176,46 @@ the canonical will match — it just counts for less than being asked for. That
 alone moved on.com's second variant from a low-confidence guess to a
 high-confidence read.
 
-### G2 — The DOM heuristic cannot see modern storefronts 🟠
+### G2 — The DOM heuristic could not see hashed-class storefronts ✅ FIXED
 
-`PRICE_SEL` is `[class*="price" i],[id*="price" i]`. Measured on the live
-rendered DOM:
+The original measurement was right about the symptom and wrong about one of
+the sites. Counting `[class*="price"]` matches on the live rendered DOM:
 
-| Site | Nodes matching `PRICE_SEL` |
-|---|---|
-| Walmart | 0 |
-| REI | 0 |
-| Sephora | 0 |
-| Target | 2 |
-| IKEA | 48 |
-| Newegg | 72 |
+| Site | Class/id matches | Verdict |
+|---|---|---|
+| Walmart | 0 | genuinely unreadable — now fixed |
+| REI | 0 | JSON-LD answers it (G1) |
+| Sephora | 0 | JSON-LD answers it (G1) |
+| Target | 2 | **already worked**; its class is `styles_currentPriceFontSize__qSy6z` |
+| IKEA | 48 | fine |
+| Newegg | 72 | fine |
 
-Sites with hashed class names publish nothing containing "price". For Walmart
-and Target there is also no JSON-LD and no price meta tag, so **every layer
-fails** — rendered or not. Those two are currently unreadable, and no test says
-so.
+So only Walmart-shaped pages were actually unreadable. Three things were
+wrong, and all three had to be fixed together:
+
+**The selector ignored automation hooks.** A store that hashes its class names
+to `ld_Ec` still ships stable `data-testid` / `data-automation-id` attributes,
+because its own QA depends on them. Walmart's price carries three. Those are a
+better bet than class names, not a worse one.
+
+**The title was the only landmark.** Walmart's h1 sits 32 hops from its own
+price, and 60 money nodes tie at the same tree distance, so ranking by
+nearness to the title is meaningless there. The buy control is 8 hops away.
+The price sits next to the button that charges it, which is the one
+arrangement every shop agrees on. The title is still tried first — every
+existing fixture depends on it — and the buy control is the fallback when
+climbing from the title finds nothing.
+
+Scoping on the buy box takes Walmart from 164 price nodes across the page to
+2, both reading $129.95.
+
+**Containers held more than one number.** Walmart prints the dollars and the
+cents in separate spans and adds a screen-reader copy beside them, so the
+container reads `$12995current price $129.95`. `parsePrice` correctly refused
+that, and the candidate was simply lost. Now an ambiguous container defers to
+its leaves, each of which holds one price and nothing else. The existing
+money-shape guard does the rest: `$129` and `95` are halves, not prices, and
+neither carries a currency marker with cents.
 
 ### G3 — The cheap path almost never wins in the wild 🟠
 
