@@ -390,27 +390,75 @@ function inQuietHours(cfg) {
   return q.start > q.end ? h >= q.start || h < q.end : h >= q.start && h < q.end;
 }
 
+// How many pages we look at once. Every one of them may open a real tab, so
+// this is the line between finishing a long list and behaving like a crawler.
+// Measured against live sites, four out of five checks need a rendered page,
+// which is why a serial run took a watchlist into the minutes.
+const LANES = 3;
+
+// One page cannot hold up the rest. The layers below are each bounded — a
+// 12s data fetch, a 12s HTML fetch, a 20s tab load and a settle wait — but
+// they can stack, so this is the ceiling on the whole attempt.
+const ITEM_BUDGET_MS = 50000;
+
+// Items grouped by the site they come from. Lanes take whole groups, so two
+// checks never hit the same store at once: a shop that sees three tabs open
+// together is being crawled, and starts answering like it thinks so.
+function groupByHost(items) {
+  const groups = new Map();
+  for (const item of items) {
+    const host = Rules.hostOf(item.url) || item.id;
+    if (!groups.has(host)) groups.set(host, []);
+    groups.get(host).push(item);
+  }
+  return Array.from(groups.values());
+}
+
+// Fail an item rather than let the run hang on it. The work underneath keeps
+// its own promise and still closes any tab it opened; we simply stop waiting.
+function withBudget(promise, ms) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error("the check took too long and was given up on")), ms);
+    promise.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); }
+    );
+  });
+}
+
 async function checkAll() {
   const cfg = await Store.getSettings();
   const items = await Store.getItems();
   const due = items.filter(Store.isCheckable);
-  let ok = 0, failed = 0;
+  const groups = groupByHost(due);
+  let ok = 0, failed = 0, next = 0;
 
   // Write after every item, not once at the end. A single throw part-way
   // through used to discard every reading the run had already earned, and a
   // long watchlist gives it plenty of chances to throw.
-  for (const item of due) {
-    try {
-      const r = await checkItem(item, cfg);
-      if (r.ok) ok++; else failed++;
-    } catch (e) {
-      failed++;
-      item.lastChecked = Date.now();
-      item.lastError = (e && e.message) || "the check could not be completed";
-      item.failCount = (item.failCount || 0) + 1;
+  async function lane() {
+    while (next < groups.length) {
+      const group = groups[next++];
+      for (const item of group) {
+        try {
+          const r = await withBudget(checkItem(item, cfg), ITEM_BUDGET_MS);
+          if (r && r.ok) ok++; else failed++;
+        } catch (e) {
+          failed++;
+          item.lastChecked = Date.now();
+          item.lastError = (e && e.message) || "the check could not be completed";
+          item.failCount = (item.failCount || 0) + 1;
+        }
+        await Store.setItems(items);
+      }
     }
-    await Store.setItems(items);
   }
+
+  const lanes = [];
+  for (let i = 0; i < Math.min(LANES, groups.length); i++) lanes.push(lane());
+  await Promise.all(lanes);
+
   await updateBadge(items);
   return { checked: due.length, ok, failed, skipped: items.length - due.length };
 }

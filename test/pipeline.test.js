@@ -419,6 +419,100 @@ function reset() {
   ok("fromHtml resolves the variant page", fromHtml && fromHtml.price === 169);
   ok("at high confidence, so no tab is needed", fromHtml && fromHtml.conf === "high");
 
+  // ---- parallel checking -----------------------------------------------------
+  // A single offer resolves at high confidence, so these never reach for a tab
+  // and the timing below is the runner's, not the extractor's.
+  const soloLd = (url, price) => htmlResponse(
+    '<html><head><title>T</title><link rel="canonical" href="' + url + '">' +
+    '<script type="application/ld+json">' + JSON.stringify({
+      "@context": "https://schema.org", "@type": "Product", name: "T", url,
+      offers: { "@type": "Offer", url, price, priceCurrency: "USD",
+                availability: "https://schema.org/InStock" }
+    }) + "</script></head><body></body></html>");
+
+  // Watch how many reads are in the air at once, and whether any two of them
+  // are against the same store.
+  function watchFetches(delayMs) {
+    const state = { peak: 0, live: 0, perHost: {}, hostPeak: 0 };
+    fetchImpl = async (u) => {
+      const host = new URL(u).hostname;
+      state.live++; state.perHost[host] = (state.perHost[host] || 0) + 1;
+      state.peak = Math.max(state.peak, state.live);
+      state.hostPeak = Math.max(state.hostPeak, state.perHost[host]);
+      await new Promise((r) => setTimeout(r, delayMs));
+      state.live--; state.perHost[host]--;
+      return soloLd(u, 50);
+    };
+    return state;
+  }
+
+  const seed = (urls) => urls.map((u) => Store.makeItem(
+    { url: u, title: "T", price: 50, currency: "USD" }, null, { confirmed: true }));
+
+  section("parallel: separate stores are checked at the same time");
+  reset();
+  let watch = watchFetches(15);
+  await Store.setItems(seed([
+    "https://a.test/products/1", "https://b.test/products/1",
+    "https://c.test/products/1", "https://d.test/products/1",
+    "https://e.test/products/1", "https://f.test/products/1"
+  ]));
+  let run = await checkAll();
+  ok("every item was checked", run.checked === 6 && run.ok === 6);
+  ok("more than one at a time", watch.peak > 1);
+  ok("never more than the lane limit", watch.peak <= 3);
+  const savedRun = await Store.getItems();
+  ok("every result was written", savedRun.filter((i) => i.lastPrice === 50).length === 6);
+
+  section("parallel: one store is never hit twice at once");
+  reset();
+  watch = watchFetches(15);
+  await Store.setItems(seed([
+    "https://one.test/products/1", "https://one.test/products/2",
+    "https://one.test/products/3", "https://one.test/products/4"
+  ]));
+  run = await checkAll();
+  ok("all four checked", run.checked === 4 && run.ok === 4);
+  ok("the same store saw one at a time", watch.hostPeak === 1);
+
+  section("parallel: a stuck page does not hold up the run");
+  reset();
+  // withBudget is the seam the runner uses; exercise it directly so the test
+  // does not have to wait out the real ceiling.
+  let stuck = new Promise(() => {});
+  let budgetErr = null;
+  try { await withBudget(stuck, 30); } catch (e) { budgetErr = e.message; }
+  ok("a hung check is given up on", /took too long/.test(budgetErr || ""));
+  ok("a check that answers in time is untouched",
+     (await withBudget(Promise.resolve("fine"), 200)) === "fine");
+
+  section("parallel: rule writes do not overwrite each other");
+  reset();
+  // Every rule write is read-modify-write against one storage key. Run three
+  // at once, as the lanes now do, and without a queue the last write wins and
+  // the other two hosts are simply forgotten.
+  await Promise.all([
+    Rules.recordFailure("https://ra.test/products/1"),
+    Rules.recordFailure("https://rb.test/products/1"),
+    Rules.recordFailure("https://rc.test/products/1")
+  ]);
+  let learned = (await Rules.all()).learned;
+  ok("all three hosts survived", Object.keys(learned).length === 3);
+  ok("each counted its own failure",
+     learned["ra.test"].fails === 1 && learned["rb.test"].fails === 1 &&
+     learned["rc.test"].fails === 1);
+
+  section("parallel: repeated failures on one host still add up");
+  reset();
+  await Promise.all([
+    Rules.recordFailure("https://rd.test/products/1"),
+    Rules.recordFailure("https://rd.test/products/2"),
+    Rules.recordFailure("https://rd.test/products/3")
+  ]);
+  learned = (await Rules.all()).learned;
+  ok("three failures counted as three", learned["rd.test"].fails === 3);
+  ok("and that retires the cheap path", learned["rd.test"].needsTab === true);
+
   console.log("\n" + pass + " passed, " + fail + " failed");
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.error("HARNESS ERROR:", e); process.exit(1); });
