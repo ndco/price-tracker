@@ -267,6 +267,82 @@ function skipped(name) {
   check("and that is high confidence", se && se.conf, "high");
   check("with the variant's own details attached", se && se.sku, "SKU-1");
 
+  // ---- storefronts with no semantic class names -----------------------------
+  // Markup copied from the live pages on 2026-09-07. These sites hash their
+  // class names, so nothing matches [class*="price"], and they nest the title
+  // so far from the price that climbing from the h1 never reaches it. What
+  // they do publish is automation hooks, and a buy button next to the price.
+  log("<h2>hashed-class storefronts</h2>");
+
+  // Wrap `inner` in `depth` anonymous divs, so a climb from the title cannot
+  // reach the rest of the page inside its hop budget. Walmart's h1 sits 32
+  // hops from its own price.
+  const nest = (depth, inner) =>
+    "<div>".repeat(depth) + inner + "</div>".repeat(depth);
+
+  // The real Walmart price block, verbatim: dollars and cents in separate
+  // spans, an aria-hidden visual copy, and a screen-reader sentence beside it.
+  // The container therefore reads "$12995current price $129.95".
+  const walmartPrice = `
+    <div data-automation-id="product-price" class="mt1" data-test-id="gpt-global-product-price">
+      <div class="flex flex-wrap justify-start items-baseline lh-title" data-test-id="gpt-price-flex-container">
+        <div class="mr1 mr2-xl b black f7" aria-hidden="true" data-test-id="gpt-main-price-display">
+          <span class="f7">$</span><span class="f4">129</span><span class="f7">95</span>
+        </div>
+        <span class="ld_Ec">current price $129.95</span>
+      </div>
+    </div>`;
+
+  // A neutral-looking tile list, so only the buy-box scoping can save us —
+  // the noise filter is deliberately given nothing to match on.
+  const walmartTiles = ["40.33", "25.74", "6.92", "29.97", "49.97", "149.99"]
+    .map((p) => `<div data-automation-id="product-price"><span class="ld_Ec">current price $${p}</span></div>`)
+    .join("");
+
+  const walmart = `<html><head><title>Instant Pot 6Qt DUO</title></head><body><main>
+    ${nest(10, "<h1>Instant Pot 6Qt DUO 7-in-1 Multi-Cooker</h1>")}
+    <div class="ld_A"><div class="ld_B">${walmartTiles}</div></div>
+    <div class="ld_C"><div class="ld_D"><div data-testid="buyBox-container">
+      ${walmartPrice}
+      <div class="nearer-mid-gray">$25.00/qt</div>
+      <button type="button">Add to cart</button>
+    </div></div></div>
+  </main></body></html>`;
+
+  const wm = await extract(walmart, "https://www.walmart.com/ip/575389962");
+  check("walmart price found with no price-shaped class name", wm && wm.price, 129.95);
+  check("walmart via the DOM heuristic", wm && wm.via, "heuristic");
+  check("walmart did not pick a cheaper tile", wm && wm.price > 100, true);
+  check("walmart ignored the per-unit rate", wm && wm.price !== 25, true);
+
+  // The split spans must not become candidates of their own: "$129" and "95"
+  // are halves of a price, and "$12995" is neither.
+  check("walmart did not read the split spans as prices",
+        wm && [129, 95, 12995].indexOf(wm.price) < 0, true);
+
+  // Target hashes its classes too, but the hash keeps the word: the class is
+  // `styles_currentPriceFontSize__qSy6z`, and there is a data-test hook.
+  const target = `<html><head><title>Stanley Quencher</title></head><body><main>
+    <h1>Stanley 40 oz Quencher Tumbler</h1>
+    <div class="styles_wrap__a1b">
+      <span data-test="product-price" class="styles_currentPriceFontSize__qSy6z">$45.00</span>
+    </div>
+    <div><span>$RC("B:1","S:1")</span></div>
+    <button type="button">Add to cart</button>
+  </main></body></html>`;
+  const tg = await extract(target, "https://www.target.com/p/-/A-88429520");
+  check("target price found", tg && tg.price, 45);
+  check("target ignored the streaming placeholder", tg && tg.price !== 1, true);
+
+  // A page whose only price hook is a data attribute, with no buy button and
+  // no useful title position, still must not invent a number from nothing.
+  const nothing = `<html><head><title>Mystery</title></head><body><main>
+    ${nest(10, "<h1>Mystery Item</h1>")}
+    <div><span>ships in 2-3 days</span></div>
+  </main></body></html>`;
+  check("no money anywhere -> null",
+        await extract(nothing, "https://shop.test/products/mystery-1234"), null);
+
   log(`<h2 class="${fail ? "fail" : "pass"}">${pass} passed, ${fail} failed</h2>`);
   window.__RESULT__ = { pass, fail };
 })().catch(e => { log(`<div class="fail">HARNESS ERROR: ${e && e.message}</div>`);

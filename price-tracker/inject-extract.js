@@ -192,35 +192,82 @@
     return false;
   }
 
-  const PRICE_SEL = '[class*="price" i],[id*="price" i]';
+  // Class and id first, then the automation hooks. A store that hashes its
+  // class names to `ld_Ec` still ships stable `data-testid` attributes,
+  // because its own QA depends on them — which makes them a better bet than
+  // the class names, not a worse one. Walmart's price carries none of the
+  // usual class hints and three separate data attributes naming it.
+  const PRICE_SEL = '[class*="price" i],[id*="price" i],' +
+    '[data-test*="price" i],[data-testid*="price" i],[data-test-id*="price" i],' +
+    '[data-automation-id*="price" i],[itemprop="price"]';
   // Above this, an ancestor has stopped being "the product" and has started
   // being "the page": on.com's fifth ancestor from the title held 58 price
   // nodes, nearly all of them accessories in a carousel.
   const CROWDED = 6;
 
-  // Narrow the search to the region that describes THIS product. Climbs from
-  // the title until prices appear, then stops before the branch turns into the
-  // whole page.
-  function productRoot() {
-    const typed = DOC.querySelector('[itemtype*="Product" i]');
-    if (typed) return typed;
+  // The control that buys the thing. On a deeply nested storefront this is a
+  // far better landmark than the title: Walmart's h1 sits 32 hops from its own
+  // price, while the Add to cart button sits 8 away. The price is next to the
+  // button that charges it, which is the one arrangement every shop agrees on.
+  const BUY_RE = /^\s*(?:add to (?:cart|bag|basket)|buy now|add to trolley)/i;
 
-    const h1 = DOC.querySelector("h1");
-    if (h1) {
-      let best = null;
-      for (let n = h1.parentElement, hops = 0; n && hops < 8; n = n.parentElement, hops++) {
-        const found = n.querySelectorAll(PRICE_SEL).length;
-        if (!found) continue;
-        // The first ancestor that sees any price is the tightest useful scope.
-        if (!best) best = n;
-        // Keep widening only while the neighbourhood stays small enough to be
-        // about one product; the moment it balloons, keep what we had.
-        if (found > CROWDED) break;
-        best = n;
-      }
-      if (best) return best;
+  function buyControl(scope) {
+    const where = scope || DOC;
+    if (!where.querySelectorAll) return null;
+    for (const el of where.querySelectorAll('button,[role="button"],input[type="submit"]')) {
+      const label = ((el.textContent || "") + " " +
+                     (el.getAttribute("aria-label") || "") + " " +
+                     (el.getAttribute("value") || "")).trim();
+      if (BUY_RE.test(label)) return el;
     }
-    return DOC.querySelector("main") || DOC.body || DOC;
+    return null;
+  }
+
+  // Climb from a landmark until prices appear, then stop before the branch
+  // turns into the whole page.
+  function climbFrom(start, limit) {
+    let best = null;
+    for (let n = start && start.parentElement, hops = 0; n && hops < limit;
+         n = n.parentElement, hops++) {
+      const found = n.querySelectorAll(PRICE_SEL).length;
+      if (!found) continue;
+      // The first ancestor that sees any price is the tightest useful scope.
+      if (!best) best = n;
+      // Keep widening only while the neighbourhood stays small enough to be
+      // about one product; the moment it balloons, keep what we had.
+      if (found > CROWDED) break;
+      best = n;
+    }
+    return best;
+  }
+
+  // Narrow the search to the region that describes THIS product, and say which
+  // landmark anchored it — the ranking below measures distance from whichever
+  // one actually found the region.
+  function productScope() {
+    const typed = DOC.querySelector('[itemtype*="Product" i]');
+    if (typed) return { root: typed, anchor: DOC.querySelector("h1") || typed };
+
+    // The title first: on a page built out of headings and sections it is the
+    // most direct statement of what the page is about, and every fixture we
+    // have relies on it.
+    const h1 = DOC.querySelector("h1");
+    const byTitle = h1 ? climbFrom(h1, 8) : null;
+    if (byTitle) return { root: byTitle, anchor: h1 };
+
+    // Nothing near the title. On a React storefront the price is nowhere near
+    // the heading, so look for the buy box instead. Walmart goes from 164
+    // price nodes across the page to 2 inside it.
+    const buy = buyControl(DOC);
+    const byBuy = buy ? climbFrom(buy, 10) : null;
+    if (byBuy) return { root: byBuy, anchor: buy };
+
+    const fallback = DOC.querySelector("main") || DOC.body || DOC;
+    return { root: fallback, anchor: h1 || fallback };
+  }
+
+  function productRoot() {
+    return productScope().root;
   }
 
   // How far apart two nodes sit in the tree. The real price is a near neighbour
@@ -243,7 +290,10 @@
   // Either a currency marker, or an amount written with cents. A bare integer
   // in a "price"-ish container is far more often a size, a capacity or a count.
   const MONEY_TEXT_RE = /[$€£¥₹₩]|\b(?:USD|EUR|GBP|CAD|AUD|NZD|JPY|INR|KRW)\b|\d[.,]\d{2}(?!\d)/i;
-  const EXCLUDE_RE = /save|off\b|shipping|coupon|each|per\s|\/\s*(mo|month|yr|year)|installment|afterpay|klarna|affirm/i;
+  // Money that is not this product's price: a discount, a delivery charge, a
+  // financing instalment, or a unit rate. Walmart prints "$25.00/qt" beside
+  // the real price, and a shelf rate is not what anyone is tracking.
+  const EXCLUDE_RE = /save|off\b|shipping|coupon|each|per\s|\/\s*(mo|month|yr|year|oz|qt|lb|kg|g|ml|l|ct|ea|sq\s?ft|ft)\b|installment|afterpay|klarna|affirm/i;
 
   // A category, search or collection page is full of prices, none of which is
   // "this page's price". Tier 1 already refuses when many offers exist and none
@@ -276,43 +326,69 @@
     return false;
   }
 
+  function isHidden(el) {
+    return LIVE && el.offsetParent === null &&
+      (!el.getClientRects || el.getClientRects().length === 0);
+  }
+
+  function isStruck(el) {
+    if (LIVE) {
+      try {
+        return String(VIEW.getComputedStyle(el).textDecorationLine || "").includes("line-through");
+      } catch (e) { return false; }
+    }
+    // No layout to consult, so fall back to what the markup declares.
+    const style = el.getAttribute && el.getAttribute("style");
+    return !!style && /line-through/i.test(style);
+  }
+
+  // Turn one element into a ranked candidate, or nothing.
+  function candidateFrom(el, anchor) {
+    if (isHidden(el)) return null;
+    const txt = (el.textContent || "").trim();
+    if (!txt || !/\d/.test(txt) || txt.length > 120) return null;
+    if (EXCLUDE_RE.test(txt)) return null;
+    // A class merely containing "price" proves nothing — Newegg's capacity
+    // buttons carry `price-padding` and read "1TB", which is a 1 to a naive
+    // parser. Text that claims to be money has to look like money.
+    if (!MONEY_TEXT_RE.test(txt)) return null;
+    const price = parsePrice(txt);
+    if (price == null || price <= 0) return null;
+    const key = String((el.className || "") + " " + (el.id || ""));
+    return { price, raw: txt.slice(0, 40),
+             original: isStruck(el) || ORIGINAL_RE.test(key),
+             sale: SALE_RE.test(key), hops: hopsBetween(anchor, el) };
+  }
+
   function fromHeuristic() {
     if (looksLikeShelf()) return null;
-    const root = productRoot();
-    const anchor = DOC.querySelector("h1") || root;
+    const scope = productScope();
+    const root = scope.root;
+    const anchor = scope.anchor || root;
     const nodes = root.querySelectorAll(PRICE_SEL);
     const cands = [];
     for (const el of nodes) {
-      if (LIVE && el.offsetParent === null &&
-          (!el.getClientRects || el.getClientRects().length === 0)) continue;
       if (isNoise(el)) continue;
-      const txt = (el.textContent || "").trim();
-      if (!txt || !/\d/.test(txt) || txt.length > 120) continue;
-      if (EXCLUDE_RE.test(txt)) continue;
-      // A class merely containing "price" proves nothing — Newegg's capacity
-      // buttons carry `price-padding` and read "1TB", which is a 1 to a naive
-      // parser. Text that claims to be money has to look like money.
-      if (!MONEY_TEXT_RE.test(txt)) continue;
-      const price = parsePrice(txt);
-      if (price == null || price <= 0) continue;
-      const key = String((el.className || "") + " " + (el.id || ""));
-      let struck = false;
-      if (LIVE) {
-        try {
-          struck = String(VIEW.getComputedStyle(el).textDecorationLine || "").includes("line-through");
-        } catch (e) {}
-      } else {
-        // No layout to consult, so fall back to what the markup declares.
-        const style = el.getAttribute && el.getAttribute("style");
-        struck = !!style && /line-through/i.test(style);
+      const c = candidateFrom(el, anchor);
+      if (c) { cands.push(c); continue; }
+      // The container held more than one number, so `parsePrice` refused it.
+      // That is usually markup, not ambiguity: Walmart prints the dollars and
+      // the cents in separate spans and adds a screen-reader copy alongside,
+      // so the container reads "$4033current price $40.33". Ask the leaves,
+      // each of which holds one price and nothing else.
+      if (!el.querySelectorAll) continue;
+      for (const leaf of el.querySelectorAll("*")) {
+        if (leaf.children && leaf.children.length) continue;
+        const lc = candidateFrom(leaf, anchor);
+        if (lc) cands.push(lc);
       }
-      cands.push({ price, raw: txt.slice(0, 40), original: struck || ORIGINAL_RE.test(key),
-                   sale: SALE_RE.test(key), hops: hopsBetween(anchor, el) });
     }
     if (!cands.length) return null;
 
-    // Nearest to the product title wins; among equally near candidates, one
-    // explicitly marked as the sale price wins, then the lower number.
+    // Nearest to the landmark wins — the title on a page built out of
+    // headings, the buy control on one that is not. Among equally near
+    // candidates, one explicitly marked as the sale price wins, then the
+    // lower number.
     const byNearness = (a, b) => a.hops - b.hops ||
       (b.sale ? 1 : 0) - (a.sale ? 1 : 0) || a.price - b.price;
     const pool = cands.filter((c) => !c.original);
