@@ -18,7 +18,10 @@ http.createServer((q,s)=>{
   if(!f.startsWith(ROOT)){s.writeHead(403);return s.end();}
   fs.readFile(f,(e,b)=>{
     if(e){s.writeHead(404);return s.end("404 "+rel);}
-    s.writeHead(200,{"Content-Type":T[path.extname(f)]||"application/octet-stream"});
+    // CORS on GET so a live product page can pull the extractor in and run it
+    // against its own rendered DOM — see test/live-rendered.md.
+    s.writeHead(200,{"Content-Type":T[path.extname(f)]||"application/octet-stream",
+                     "Access-Control-Allow-Origin":"*"});
     s.end(b);
   });
 }).listen(8731,()=>console.log("serving on http://localhost:8731"));

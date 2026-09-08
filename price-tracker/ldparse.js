@@ -191,33 +191,45 @@
     return false;
   }
 
-  // Decide which offer describes the page at `href`. Scoring beats taking the
-  // first, because recommendation carousels publish offers too.
+  // Score every offer on how well it claims to be *this* page. Recommendation
+  // carousels publish offers too, so taking the first would be a coin toss.
   // `alt` is the page's canonical URL when it differs from the address you
   // arrived on. Stores redirect shortened or legacy handles, and their offer
   // URLs point at the canonical — without it every offer looks unclaimed.
-  function pickForPage(cands, href, alt) {
-    if (!cands.length) return null;
-    if (cands.length === 1) return Object.assign({ conf: "high" }, cands[0]);
-
+  function scoreOffers(cands, href, alt) {
     let origin = "", here = "", search = "";
     try { const u = new URL(href); origin = u.origin; here = u.pathname; search = u.search; } catch (e) {}
     let there = "";
     try { if (alt) there = new URL(alt, origin || undefined).pathname; } catch (e) {}
-    const hay = (here + " " + search + " " + there).toLowerCase();
+    // Two different questions, kept apart. `asked` is the address the shopper
+    // is actually on. `canon` is where the store would rather send them, and
+    // it names the *default* variant — so on.com's canonical points at
+    // black-eclipse even when you asked for dustrose. Pooling the two let the
+    // default variant collect the requested variant's evidence and tie with
+    // it, and the tie then resolved to whichever was cheaper. Canonical
+    // evidence still counts, because a legacy handle redirects and only the
+    // canonical will match; it just counts for less than being asked for.
+    const asked = (here + " " + search).toLowerCase();
+    const canon = (there || "").toLowerCase();
     const idM = here.match(/\/(?:product|dp|p|itm|products|prod)\/([A-Za-z0-9._-]+)/i);
     const colorM = here.match(/\/colou?r\/([A-Za-z0-9._-]+)/i);
 
     const scored = cands.map((c) => {
       let s = 0;
       const p = c.url ? pathOf(c.url, origin) : "";
-      if (p && (p === here || (there && p === there))) s += 100;
-      if (c.sku && hay.includes(c.sku.toLowerCase())) s += 80;
+      if (p && p === here) s += 100;
+      else if (p && there && p === there) s += 90;
+      if (c.sku) {
+        const sku = c.sku.toLowerCase();
+        if (asked.includes(sku)) s += 80;
+        else if (canon.includes(sku)) s += 40;
+      }
       if (colorM && p && p.includes(colorM[1])) s += 40;
       if (idM && p && p.includes(idM[1])) s += 30;
       if (c.color) {
         const words = c.color.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 2);
-        if (words.length && words.every((w) => hay.includes(w))) s += 20;
+        if (words.length && words.every((w) => asked.includes(w))) s += 20;
+        else if (words.length && words.every((w) => canon.includes(w))) s += 10;
       }
       return Object.assign({ _score: s }, c);
     });
@@ -227,19 +239,78 @@
     // size as its own offer, and the first is often the size that ran out.
     const buyable = (c) => (c.stock === "in" ? 0 : c.stock === "low" ? 1 : c.stock === "out" ? 3 : 2);
     scored.sort((a, b) => b._score - a._score || buyable(a) - buyable(b) || a.price - b.price);
+    return scored;
+  }
+
+  // Does anything in this structured data claim to be the page's own product?
+  // Distinct from "can we read a price": a page can be unambiguously about one
+  // product whose variants we cannot tell apart. The shelf test needs the
+  // former, and must not read a refusal as evidence of a category page.
+  function pageIsClaimed(cands, href, alt) {
+    if (!cands.length) return false;
+    if (cands.length === 1) return true;
+    return scoreOffers(cands, href, alt)[0]._score > 0;
+  }
+
+  // Prices are money, so compare them as money.
+  function sameMoney(a, b) {
+    return a != null && b != null && Math.abs(a - b) < 0.005;
+  }
+
+  function declaredHas(declared, price) {
+    if (!declared) return false;
+    const list = Array.isArray(declared) ? declared : [declared];
+    return list.some((d) => sameMoney(Number(d), price));
+  }
+
+  // Decide which offer describes the page at `href`.
+  //
+  // `declared` is what the page says about its own price in its own voice —
+  // the price meta tag, or the money actually printed in the product region.
+  // It is the tiebreaker, and the reason a variant page can now be read with
+  // confidence instead of guessed at.
+  //
+  // The governing rule: confidence comes from corroboration. One source naming
+  // a number is a claim. Two independent sources naming the same number is
+  // evidence. Nothing else earns "high", and anything short of it refuses —
+  // because the layer below (meta tags, then the rendered page) gets a turn,
+  // and a wrong number recorded confidently is the one outcome we cannot undo.
+  function pickForPage(cands, href, alt, declared) {
+    if (!cands.length) return null;
+    if (cands.length === 1) return Object.assign({ conf: "high" }, cands[0]);
+
+    const scored = scoreOffers(cands, href, alt);
     const top = scored[0];
     const tied = scored.filter((c) => c._score === top._score);
-    const prices = new Set(tied.map((c) => c.price));
 
-    // Nothing on the page claimed any of these offers as its own, and they
-    // disagree about the money. That is a shelf, not a product: a category or
-    // search page listing many things. Refuse rather than pick one at random.
-    if (top._score === 0 && cands.length > 1 && prices.size > 1) return null;
+    // One offer claims the page more strongly than any other. That is the
+    // page's product, and there is nothing left to be ambiguous about.
+    if (tied.length === 1) return Object.assign({ conf: "high" }, top);
+
+    const prices = new Set(tied.map((c) => c.price));
 
     // Tied offers that agree on price are not ambiguous: Allbirds lists 14 size
     // variants at one URL, all the same money.
-    if (tied.length > 1 && prices.size > 1) return Object.assign({ conf: "low" }, top);
-    return Object.assign({ conf: "high" }, top);
+    if (prices.size === 1) return Object.assign({ conf: "high" }, top);
+
+    // Nothing claimed any of these offers as its own, and they disagree about
+    // the money. That is a shelf: a category or search page listing many
+    // things. Refuse rather than pick one at random.
+    if (top._score === 0) return null;
+
+    // Several offers claim the page and disagree about the price. This is the
+    // ordinary shape of a variant page — REI publishes 170 offers all carrying
+    // the page's own URL — and picking the cheapest is how a $79.95 jacket got
+    // recorded at $19.83. Let the page's own declared price decide.
+    const backed = tied.filter((c) => declaredHas(declared, c.price));
+    const backedPrices = new Set(backed.map((c) => c.price));
+    if (backedPrices.size === 1) {
+      return Object.assign({ conf: "high", corroborated: true }, backed[0]);
+    }
+
+    // Nothing decides it. Refusing is the whole point: the meta layer and the
+    // rendered page are still to come, and either can answer where we cannot.
+    return null;
   }
 
   // Pull ld+json block contents out of raw HTML, for the DOM-free path.
@@ -282,7 +353,13 @@
     const blocks = jsonLdBlocks(html);
     const title = titleFrom(html);
     const cands = offersFrom(blocks, title);
-    const picked = pickForPage(cands, href, canonicalFrom(html, href));
+    // Read the meta price first so it can corroborate an offer, rather than
+    // only standing in when JSON-LD fails. On a variant page it is often the
+    // one field that names the price the shopper is actually looking at.
+    const amount = metaFrom(html, "product:price:amount") || metaFrom(html, "og:price:amount");
+    const declared = parsePrice(amount, MULTI);
+    const picked = pickForPage(cands, href, canonicalFrom(html, href),
+                               declared != null && declared > 0 ? [declared] : null);
     if (picked) {
       return Object.assign({}, picked, {
         via: cands.length > 1 ? "jsonld-variant" : "jsonld",
@@ -290,8 +367,7 @@
         title: picked.title || title
       });
     }
-    const amount = metaFrom(html, "product:price:amount") || metaFrom(html, "og:price:amount");
-    const price = parsePrice(amount, MULTI);
+    const price = declared;
     if (price != null && price > 0) {
       return { price, raw: str(amount), list: null,
         currency: metaFrom(html, "product:price:currency") || metaFrom(html, "og:price:currency") || "",
@@ -302,7 +378,8 @@
   }
 
   root.PTLd = { str, parsePrice, listPriceOf, stockOf, imageOf, sizeOf,
-                offersFrom, pickForPage, pathOf, jsonLdBlocks, metaFrom, titleFrom,
+                offersFrom, pickForPage, scoreOffers, pageIsClaimed, sameMoney,
+                pathOf, jsonLdBlocks, metaFrom, titleFrom,
                 canonicalFrom, fromHtml, urlLooksLikeProduct, urlLooksLikeListing,
                 hasListingType };
 })(typeof self !== "undefined" ? self : globalThis);

@@ -49,12 +49,50 @@
       texts.push(b.textContent);
     }
     const all = LD.offersFrom(texts, DOC.title);
-    const c = LD.pickForPage(all, HREF, canonicalUrl());
+    const c = LD.pickForPage(all, HREF, canonicalUrl(), declaredPrices());
     if (!c) return null;
     return Object.assign({}, c, {
       via: all.length > 1 ? "jsonld-variant" : "jsonld",
       candidates: all.length
     });
+  }
+
+  // What the page says its own price is, in its own voice. This is what turns
+  // a tie between variant offers into an answer instead of a guess.
+  //
+  // The meta tag first: it is a single authoritative field, and a store that
+  // publishes one has told us which of its variants this page is about.
+  // Failing that, the money actually printed in the product region — the
+  // number the shopper is looking at. Both are independent of the JSON-LD, so
+  // agreement between them and an offer is real corroboration.
+  function declaredPrices() {
+    const meta = parsePrice(
+      metaContent('meta[property="product:price:amount"]') ||
+      metaContent('meta[property="og:price:amount"]'), MULTI);
+    if (meta != null && meta > 0) return [meta];
+    return visiblePrices();
+  }
+
+  // Money printed inside the product region. Deliberately reuses the same
+  // filters as the DOM heuristic — noise sections, non-money text, per-month
+  // financing — so a hint can never come from somewhere the heuristic itself
+  // would refuse to look.
+  function visiblePrices() {
+    let root;
+    try { root = productRoot(); } catch (e) { return []; }
+    if (!root || !root.querySelectorAll) return [];
+    const out = [];
+    for (const el of root.querySelectorAll(PRICE_SEL)) {
+      if (LIVE && el.offsetParent === null &&
+          (!el.getClientRects || el.getClientRects().length === 0)) continue;
+      if (isNoise(el)) continue;
+      const txt = (el.textContent || "").trim();
+      if (!txt || txt.length > 120) continue;
+      if (EXCLUDE_RE.test(txt) || !MONEY_TEXT_RE.test(txt)) continue;
+      const p = parsePrice(txt);
+      if (p != null && p > 0) out.push(p);
+    }
+    return out;
   }
 
   // --- state blobs ------------------------------------------------------------
@@ -219,7 +257,11 @@
 
     const offers = LD.offersFrom(texts, "");
     // Something on the page claims to be the page's own product: not a shelf.
-    if (offers.length && LD.pickForPage(offers, HREF, canonicalUrl())) return false;
+    // Ask whether an offer *claims* the page, not whether we could read a
+    // price off it. A variant page whose offers disagree about the money is
+    // still unambiguously one product — reading a refusal as evidence of a
+    // category page would send the heuristic away exactly when it is needed.
+    if (LD.pageIsClaimed(offers, HREF, canonicalUrl())) return false;
     // Exactly one offer is one product, whatever else the page carries.
     if (offers.length === 1) return false;
 

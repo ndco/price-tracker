@@ -487,6 +487,12 @@ function chipFor(item, ctx) {
   if (ctx.stale) return `<span class="chip chip-stale">CAN'T CHECK</span>`;
   // The page loaded fine but showed a different thing, so nothing was recorded.
   if (ctx.mismatched) return `<span class="chip chip-stale">CAN'T VERIFY</span>`;
+  // A reading the page would not let us pin down. Another check reads the same
+  // ambiguous page, so this is not "confirming" — it is stuck until the site
+  // changes or the user corrects it.
+  if (ctx.pending && item.pendingKind === "unverified") {
+    return `<span class="chip chip-stale">CAN'T VERIFY</span>`;
+  }
   // A reading is waiting on a second opinion before it counts.
   if (ctx.pending) return `<span class="chip chip-pending">CONFIRMING</span>`;
   // Waiting for a sold-out item to return. Its price is irrelevant until then.
@@ -1179,6 +1185,11 @@ function detailScreen() {
   } else if (item.identityMismatch) {
     wrap.appendChild(h("p", "paused-note warn-note",
       `CAN'T VERIFY — ${escapeHtml(item.identityMismatch)}. NOTHING RECORDED WHILE THE PAGE SHOWS A DIFFERENT ITEM.`));
+  } else if (item.pendingPrice != null && item.pendingKind === "unverified") {
+    wrap.appendChild(h("p", "paused-note warn-note",
+      `SAW ${money(item, item.pendingPrice)} — ${escapeHtml(item.suspect ||
+        "could not tell which number on the page is the price")}. NOTHING IS RECORDED ` +
+      `UNTIL THE PAGE IS CLEARER, BECAUSE A SECOND LOOK READS THE SAME PAGE.`));
   } else if (item.pendingPrice != null) {
     wrap.appendChild(h("p", "paused-note warn-note",
       `SAW ${money(item, item.pendingPrice)} — ${escapeHtml(item.suspect || "confirming")}. IT COUNTS ONCE A SECOND CHECK AGREES.`));

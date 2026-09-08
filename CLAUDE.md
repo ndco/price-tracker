@@ -9,6 +9,11 @@ server, no analytics — everything lives in `chrome.storage.local`.
 node test/run.js
 ```
 
+What to run when, and what counts as evidence: `docs/TESTING.md`. The scenario
+matrix and the known gaps: `docs/TEST-PLAN.md`. Every PR fills in
+`.github/PULL_REQUEST_TEMPLATE.md`, including the proof that a new test fails
+against the unfixed code.
+
 It checks syntax, resolves every manifest and `importScripts` reference, guards
 against stray files reaching the bundle, and runs the behaviour suites. For the
 extractor suite, which needs real DOM APIs:

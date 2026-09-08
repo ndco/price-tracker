@@ -191,6 +191,82 @@ function skipped(name) {
     "https://shop.test/products/one-shoe-1234");
   check("product-shaped URL with only DOM prices still extracts", bareProduct && bareProduct.price, 180);
 
+  // ---- variant pages: corroboration, or refusal -----------------------------
+  // Shapes measured on the live sites, 2026-09-07. In each one every offer
+  // carries the page's own URL, so scoring alone cannot separate them. The old
+  // code picked the cheapest and called it low confidence, which is how a
+  // $169 jacket was tracked at $118.30 and a $79.95 one at $19.83.
+  log("<h2>variant pages</h2>");
+
+  const variantGroup = (url, rows) => ({
+    "@context": "https://schema.org", "@type": "ProductGroup", url,
+    name: "Better Sweater Fleece Jacket",
+    hasVariant: rows.map((row, i) => ({
+      "@type": "Product", sku: "SKU-" + i, color: row.color, size: row.size,
+      name: "Better Sweater Fleece Jacket",
+      offers: { "@type": "Offer", url, price: row.price, priceCurrency: "USD",
+                availability: "https://schema.org/InStock" }
+    }))
+  });
+
+  const bcRows = [];
+  for (let i = 0; i < 36; i++) bcRows.push({ color: "Stonewash", size: "M", price: 169 });
+  for (let i = 0; i < 6; i++) bcRows.push({ color: "Aquatic Blue", size: "L", price: 118.3 });
+  const BC = "https://www.backcountry.com/patagonia-better-sweater-fleece-jacket-mens";
+
+  // Backcountry publishes the price meta tag, and it names the price the page
+  // is actually showing. That is a second, independent source.
+  const bcPage = `<html><head><title>Better Sweater</title>
+    <link rel="canonical" href="${BC}">
+    <meta property="product:price:amount" content="169">
+    <script type="application/ld+json">${JSON.stringify(variantGroup(BC, bcRows))}</script>
+    </head><body><h1>Better Sweater Fleece Jacket</h1></body></html>`;
+  const bc = await extract(bcPage, BC);
+  check("meta tag corroborates one variant price", bc && bc.price, 169);
+  check("corroborated variant reads as high confidence", bc && bc.conf, "high");
+
+  // The same page without the meta tag, and with nothing on screen to check
+  // against. Nothing can separate 169 from 118.30, so the JSON-LD layer must
+  // stand down rather than pick one.
+  const bcBare = `<html><head><title>Better Sweater</title>
+    <link rel="canonical" href="${BC}">
+    <script type="application/ld+json">${JSON.stringify(variantGroup(BC, bcRows))}</script>
+    </head><body><h1>Better Sweater Fleece Jacket</h1></body></html>`;
+  const bare = await extract(bcBare, BC);
+  check("no corroboration anywhere -> no reading at all", bare, null);
+
+  // REI: 170 offers at prices that are not the product's price, and no meta
+  // tag. The displayed price is the only truth on the page, so the DOM
+  // heuristic has to be allowed to answer — an ambiguous product page is not
+  // a shelf, and must not be dismissed as one.
+  const REI = "https://www.rei.com/product/235244/rei-co-op-trailmade-rain-jacket-mens";
+  const reiRows = [];
+  for (let i = 0; i < 170; i++) {
+    reiRows.push({ color: "Black", size: "M", price: [19.83, 20.83, 34.83][i % 3] });
+  }
+  const reiPage = `<html><head><title>Trailmade Rain Jacket</title>
+    <script type="application/ld+json">${JSON.stringify(variantGroup(REI, reiRows))}</script>
+    </head><body><h1>REI Co-op Trailmade Rain Jacket</h1>
+    <div class="pdp"><span class="price">$79.95</span></div></body></html>`;
+  const rei = await extract(reiPage, REI);
+  check("unreadable offers fall through to the displayed price", rei && rei.price, 79.95);
+  check("and it is not one of the published offers",
+        rei && [19.83, 20.83, 34.83].indexOf(rei.price) < 0, true);
+
+  // The displayed price is itself corroboration when it names one of the
+  // offers: then the JSON-LD layer can answer, with everything it knows.
+  const seRows = [{ color: "A", size: "S", price: 19.2 }, { color: "B", size: "M", price: 24 },
+                  { color: "C", size: "L", price: 25 }];
+  const SE = "https://www.sephora.com/product/lip-sleeping-mask-P420652";
+  const sePage = `<html><head><title>Lip Sleeping Mask</title>
+    <script type="application/ld+json">${JSON.stringify(variantGroup(SE, seRows))}</script>
+    </head><body><h1>Lip Sleeping Mask</h1>
+    <div class="pdp"><span class="price">$24.00</span></div></body></html>`;
+  const se = await extract(sePage, SE);
+  check("the price on screen picks the matching offer", se && se.price, 24);
+  check("and that is high confidence", se && se.conf, "high");
+  check("with the variant's own details attached", se && se.sku, "SKU-1");
+
   log(`<h2 class="${fail ? "fail" : "pass"}">${pass} passed, ${fail} failed</h2>`);
   window.__RESULT__ = { pass, fail };
 })().catch(e => { log(`<div class="fail">HARNESS ERROR: ${e && e.message}</div>`);

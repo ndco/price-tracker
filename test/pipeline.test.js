@@ -177,14 +177,32 @@ function reset() {
   ok("alert fires once accepted", notifs.length === 1);
 
   // ---- confidence gate ------------------------------------------------------
-  section("confidence: a low-confidence reading is not believed alone");
+  section("confidence: a low-confidence reading is never believed");
   reset();
   global.__TAB_READING__ = { price: 88, currency: "USD", via: "heuristic", conf: "low", raw: "$88" };
   item = Store.makeItem({ url: "https://shop.test/p/4", title: "T", price: 100, currency: "USD" }, null);
   r = await checkItem(item);
   ok("low confidence held", r.held === true && item.lastPrice === 100);
+  // Repeating an uncertain reading does not make it certain. The second look
+  // reads the same ambiguous page and reaches the same uncertainty.
   r = await checkItem(item);
-  ok("repeated low reading accepted", item.lastPrice === 88);
+  ok("repetition is not corroboration", item.lastPrice === 100 && r.held === true);
+  ok("marked unverified, not confirming", item.pendingKind === "unverified");
+  ok("the number is still shown", item.pendingPrice === 88);
+
+  section("confidence: a wrong price cannot launder itself through the baseline");
+  reset();
+  // The G1 shape: the add flow captured a low-confidence price, so the
+  // baseline itself is wrong. Every later reading agrees with it, because it
+  // is the same misreading of the same page.
+  global.__TAB_READING__ = { price: 19.83, currency: "USD", via: "jsonld-variant",
+                             conf: "low", raw: "19.83", title: "Rain Jacket" };
+  item = Store.makeItem({ url: "https://www.rei.com/product/235244/x", title: "Rain Jacket",
+    price: 19.83, currency: "USD" }, null, { confirmed: true });
+  for (let i = 0; i < 3; i++) await checkItem(item);
+  ok("never written to history", item.history.length === 1);
+  ok("row does not look healthy", item.pendingKind === "unverified");
+  ok("and needs attention", PT.needsAttention(item) === true);
 
   section("confidence: a modest medium-confidence move is believed");
   reset();
@@ -317,6 +335,89 @@ function reset() {
   const saved = await Store.getItems();
   ok("the first item was still written", saved[0].lastPrice === 10);
   ok("the failing item was counted, not lost", saved.length === 2);
+
+  // ---- variant pages: corroboration, or refusal ------------------------------
+  // Every shape below was measured on the live site on 2026-09-07. In each one
+  // every offer carries the page's own URL, so scoring alone cannot separate
+  // them — which is how the old code ended up picking the cheapest.
+  section("variants: the page's own declared price breaks the tie");
+  const PTLd = global.PTLd;
+  const variantLd = (url, rows) => JSON.stringify({
+    "@context": "https://schema.org", "@type": "ProductGroup", url,
+    name: "Better Sweater Fleece Jacket",
+    hasVariant: rows.map((row, i) => ({
+      "@type": "Product", sku: "PAT02Y3-" + i, color: row.color, size: row.size,
+      name: "Better Sweater Fleece Jacket",
+      offers: { "@type": "Offer", url, price: row.price, priceCurrency: "USD",
+                availability: "https://schema.org/InStock" }
+    }))
+  });
+
+  // Backcountry: 42 offers across two price tiers, meta tag says 169.
+  const BC = "https://www.backcountry.com/patagonia-better-sweater-fleece-jacket-mens";
+  const bcRows = [];
+  for (let i = 0; i < 36; i++) bcRows.push({ color: "Stonewash", size: "M", price: 169 });
+  for (let i = 0; i < 6; i++) bcRows.push({ color: "Aquatic Blue", size: "L", price: 118.3 });
+  let cands = PTLd.offersFrom([variantLd(BC, bcRows)], "Backcountry");
+  ok("all 42 offers collected", cands.length === 42);
+  let picked = PTLd.pickForPage(cands, BC, BC, [169]);
+  ok("the declared price wins, not the cheapest", picked && picked.price === 169);
+  ok("and that is high confidence", picked && picked.conf === "high");
+  ok("marked as corroborated", picked && picked.corroborated === true);
+
+  section("variants: nothing to corroborate with means refuse, not guess");
+  // REI: 170 offers at 19.83 / 20.83 / 34.83. The page sells at $79.95 and
+  // publishes no price meta tag, so none of these can be confirmed.
+  const REI = "https://www.rei.com/product/235244/rei-co-op-trailmade-rain-jacket-mens";
+  const reiRows = [];
+  for (let i = 0; i < 170; i++) {
+    reiRows.push({ color: "Black", size: "M", price: [19.83, 20.83, 34.83][i % 3] });
+  }
+  cands = PTLd.offersFrom([variantLd(REI, reiRows)], "REI");
+  ok("all 170 offers collected", cands.length === 170);
+  ok("refused with no hint", PTLd.pickForPage(cands, REI, REI, null) === null);
+  ok("refused when the hint matches nothing",
+     PTLd.pickForPage(cands, REI, REI, [79.95]) === null);
+  ok("a hint that names one of them resolves it",
+     (PTLd.pickForPage(cands, REI, REI, [34.83]) || {}).price === 34.83);
+
+  section("variants: an ambiguous product page is not a shelf");
+  // pickForPage refusing must not read as "this is a category page", or the
+  // DOM heuristic gets sent away exactly when it is the only layer left.
+  ok("offers claiming the page mark it claimed",
+     PTLd.pageIsClaimed(cands, REI, REI) === true);
+  const shelf = JSON.stringify({ "@context": "https://schema.org", "@type": "ItemList",
+    itemListElement: [
+      { "@type": "Product", name: "A", url: "https://s.test/p/a",
+        offers: { "@type": "Offer", url: "https://s.test/p/a", price: 10, priceCurrency: "USD" } },
+      { "@type": "Product", name: "B", url: "https://s.test/p/b",
+        offers: { "@type": "Offer", url: "https://s.test/p/b", price: 20, priceCurrency: "USD" } }
+    ] });
+  const shelfCands = PTLd.offersFrom([shelf], "Shelf");
+  ok("offers pointing elsewhere leave the page unclaimed",
+     PTLd.pageIsClaimed(shelfCands, "https://s.test/category/x", "") === false);
+
+  section("variants: agreement still needs no hint");
+  // Allbirds' 14 sizes at one price were never ambiguous, and must not start
+  // needing a tiebreaker now.
+  const AB = "https://www.allbirds.com/products/mens-cruiser";
+  const abRows = [];
+  for (let i = 0; i < 14; i++) abRows.push({ color: "Grey", size: String(i + 6), price: 105 });
+  cands = PTLd.offersFrom([variantLd(AB, abRows)], "Allbirds");
+  picked = PTLd.pickForPage(cands, AB, AB, null);
+  ok("one price across every size is unambiguous", picked && picked.price === 105);
+  ok("high confidence without any hint", picked && picked.conf === "high");
+
+  section("variants: the fetch path reads the meta tag as corroboration");
+  const html = '<html><head><title>Better Sweater</title>' +
+    '<link rel="canonical" href="' + BC + '">' +
+    '<meta property="product:price:amount" content="169">' +
+    '<meta property="product:price:currency" content="USD">' +
+    '<script type="application/ld+json">' + variantLd(BC, bcRows) + '</script>' +
+    '</head><body></body></html>';
+  const fromHtml = PTLd.fromHtml(html, BC);
+  ok("fromHtml resolves the variant page", fromHtml && fromHtml.price === 169);
+  ok("at high confidence, so no tab is needed", fromHtml && fromHtml.conf === "high");
 
   console.log("\n" + pass + " passed, " + fail + " failed");
   process.exit(fail ? 1 : 0);
