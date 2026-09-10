@@ -36,20 +36,40 @@
     return Object.assign({}, BUILT_IN[host] || {}, learned[host] || {});
   }
 
+  // Every write here is read-modify-write against one storage key, and checks
+  // now run several at a time. Two hosts finishing together would both read
+  // the same map and the second write would erase the first — the rule that
+  // said "this site needs a tab" would simply vanish. So writes queue behind
+  // each other. Reads are untouched; they are allowed to be slightly stale.
+  let writeQueue = Promise.resolve();
+
+  function serialized(work) {
+    const next = writeQueue.then(work, work);
+    // Keep the chain alive even when one write throws.
+    writeQueue = next.then(noop, noop);
+    return next;
+  }
+
+  function noop() {}
+
   async function set(url, patch) {
     const host = hostOf(url);
     if (!host) return null;
-    const { [KEY]: learned = {} } = await chrome.storage.local.get(KEY);
-    learned[host] = Object.assign({}, learned[host] || {}, patch, { updatedAt: Date.now() });
-    await chrome.storage.local.set({ [KEY]: learned });
-    return learned[host];
+    return serialized(async () => {
+      const { [KEY]: learned = {} } = await chrome.storage.local.get(KEY);
+      learned[host] = Object.assign({}, learned[host] || {}, patch, { updatedAt: Date.now() });
+      await chrome.storage.local.set({ [KEY]: learned });
+      return learned[host];
+    });
   }
 
   async function clear(url) {
     const host = hostOf(url);
-    const { [KEY]: learned = {} } = await chrome.storage.local.get(KEY);
-    delete learned[host];
-    await chrome.storage.local.set({ [KEY]: learned });
+    return serialized(async () => {
+      const { [KEY]: learned = {} } = await chrome.storage.local.get(KEY);
+      delete learned[host];
+      await chrome.storage.local.set({ [KEY]: learned });
+    });
   }
 
   // Remember what worked. A success ends the failure streak: the count exists
@@ -85,13 +105,22 @@
   // so stop paying for it and go straight to a rendered tab.
   const GIVE_UP_ON_FETCH = 3;
 
+  // The count has to be read and written as one step. Reading it outside the
+  // queue and writing it inside means two failures on the same host can both
+  // read 1 and both write 2, and a site that refused us three times looks like
+  // it refused us once.
   async function recordFailure(url) {
     const host = hostOf(url);
-    const { learned } = await all();
-    const fails = ((learned[host] || {}).fails || 0) + 1;
-    const patch = { fails, lastFail: Date.now() };
-    if (fails >= GIVE_UP_ON_FETCH) patch.needsTab = true;
-    return set(url, patch);
+    if (!host) return null;
+    return serialized(async () => {
+      const { [KEY]: learned = {} } = await chrome.storage.local.get(KEY);
+      const fails = ((learned[host] || {}).fails || 0) + 1;
+      const patch = { fails, lastFail: Date.now() };
+      if (fails >= GIVE_UP_ON_FETCH) patch.needsTab = true;
+      learned[host] = Object.assign({}, learned[host] || {}, patch, { updatedAt: Date.now() });
+      await chrome.storage.local.set({ [KEY]: learned });
+      return learned[host];
+    });
   }
 
   // A price corrected by hand tells us something durable: the layer that
@@ -102,10 +131,17 @@
   async function learnCorrection(url, badVia) {
     const host = hostOf(url);
     if (!host) return null;
-    const { learned } = await all();
-    const prev = (learned[host] || {}).distrust || [];
-    const distrust = badVia && prev.indexOf(badVia) < 0 ? prev.concat(badVia) : prev;
-    return set(url, { distrust, correctedAt: Date.now() });
+    // Same reason as recordFailure: the list is appended to, so it has to be
+    // read and written without anyone slipping in between.
+    return serialized(async () => {
+      const { [KEY]: learned = {} } = await chrome.storage.local.get(KEY);
+      const prev = (learned[host] || {}).distrust || [];
+      const distrust = badVia && prev.indexOf(badVia) < 0 ? prev.concat(badVia) : prev;
+      learned[host] = Object.assign({}, learned[host] || {},
+        { distrust, correctedAt: Date.now() }, { updatedAt: Date.now() });
+      await chrome.storage.local.set({ [KEY]: learned });
+      return learned[host];
+    });
   }
 
   // A reading from a layer this site has already got wrong is demoted, so the

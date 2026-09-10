@@ -134,13 +134,24 @@ Marked ✅ covered, ⚠️ partly covered, ❌ not covered.
 | F3 | Popup edits an item while a check is running | — | ❌ |
 | F4 | Alarm survives a worker restart | — | ❌ |
 
+### G. Running the checks
+
+| # | Scenario | Layer | State |
+|---|---|---|---|
+| G1 | Separate stores are checked in parallel | pipeline | ✅ |
+| G2 | Never more than the lane limit at once | pipeline | ✅ |
+| G3 | One store is never hit twice at once | pipeline | ✅ |
+| G4 | A stuck page is given up on, run continues | pipeline | ✅ |
+| G5 | Concurrent rule writes do not overwrite each other | pipeline | ✅ |
+| G6 | Repeated failures on one host still add up | pipeline | ✅ |
+
 ## Gaps found by live testing, ranked
 
 Run on 2026-09-07 against 20 live retail pages. Full method in
 `test/live-fetch.js`; the rendered-page findings were taken by driving a real
 browser.
 
-### G1 — A confidently wrong price, recorded silently ✅ FIXED
+### GAP 1 — A confidently wrong price, recorded silently ✅ FIXED
 
 Three of the sites tested publish JSON-LD offers that are **not the product's
 price**, all carrying the page's own URL so scoring alone could not separate
@@ -176,7 +187,7 @@ the canonical will match — it just counts for less than being asked for. That
 alone moved on.com's second variant from a low-confidence guess to a
 high-confidence read.
 
-### G2 — The DOM heuristic could not see hashed-class storefronts ✅ FIXED
+### GAP 2 — The DOM heuristic could not see hashed-class storefronts ✅ FIXED
 
 The original measurement was right about the symptom and wrong about one of
 the sites. Counting `[class*="price"]` matches on the live rendered DOM:
@@ -217,68 +228,47 @@ its leaves, each of which holds one price and nothing else. The existing
 money-shape guard does the rest: `$129` and `95` are halves, not prices, and
 neither carries a currency marker with cents.
 
-### G3 — The cheap path almost never wins in the wild 🟠
+### GAP 3 — Checks ran one at a time ✅ FIXED
 
 Of 20 live pages, **4 read without a tab**. The rest were bot-walled (403/429),
-served no structured data, or returned markup with no price.
+served no structured data, or returned markup with no price:
 
 ```
 20 pages — 4 read without a tab, 16 would escalate, 0 threw
 ```
 
-This makes the tab path the normal path, not the exception — which is why the
-load-ordering bug was so damaging, and why the serial ~33 s-per-item loop
-matters more than it looks. A 20-item watchlist is a ten-minute run of opening
-and closing tabs in the user's browser.
+That makes the rendered-page path the normal path, not the exception, and a
+serial run paid its full cost every time — up to ~33s per item, one after
+another, with `CHECKING…` on screen throughout.
 
-## How to run
+Checks now run in three lanes. Nine items across nine stores, each answering
+in 200ms, finish in **616ms** against a serial ~1800ms.
 
-Before and after every change:
+Lanes take whole **per-host groups**, never individual items, so two checks
+never hit the same store at once. A shop that sees three tabs open together is
+being crawled and starts answering like it thinks so, which is how a site ends
+up on the blocker list.
 
-```bash
-node test/run.js
-```
+Each item also has a ceiling. The layers below are individually bounded — a
+12s data fetch, a 12s HTML fetch, a 20s tab load, a settle wait — but they
+stack, so one page can no longer hold up the run.
 
-The extractor fixture suite, which needs real DOM APIs:
+**Concurrency forced a second fix.** Every rule write is read-modify-write
+against a single storage key. Run three at once and, without a queue, all
+three read the same map and the last write erases the other two: the rule
+saying "this site needs a tab" simply vanishes. Rule writes are now serialized,
+and `recordFailure` computes its count inside that queue rather than outside it
+— otherwise two failures both read 1 and both write 2.
 
-```bash
-node test/serve.js
-```
+## Still open
 
-Then open `http://localhost:8731/test/extract.html`.
-
-Any popup screen, without loading the extension:
-
-```bash
-node test/serve.js
-```
-
-Then open `http://localhost:8731/test/harness.html?mode=guards`.
-
-The live probe — occasionally, and never in CI:
-
-```bash
-node test/live-fetch.js
-```
-
-## Cadence
-
-- **Every change:** `node test/run.js`. Non-negotiable, and fast.
-- **Every extractor change:** the fixture suite as well.
-- **Every acquisition or lifecycle change:** add the wiring assertion first,
-  and confirm it fails before you fix the code. A wiring test you never saw
-  fail is a wiring test you cannot trust.
-- **Monthly, or after any "it stopped working" report:** the live probe. When a
-  site has moved on, capture it into `fixtures/` and write the case — that is
-  how every fixture in there was born.
-
-## Adding a case
-
-A new fixture earns its place by having broken something. Capture the page,
-add it to `fixtures/`, and write the assertion that fails without the fix.
-
-For anything touching ordering, injection, or storage, write the wiring
-assertion too, and watch it fail first. The three checks in `test/run.js`
-under **Injection wiring**, **Message wiring**, and **Tab load wiring** each
-exist because something shipped broken and no behaviour test could have
-noticed.
+| # | Gap | Why it matters |
+|---|---|---|
+| F2 | Worker terminated mid-`checkAll` | MV3 kills idle workers; untested in real Chrome |
+| F3 | Popup edits an item while a check runs | Lost update between read and write |
+| F4 | Alarm survives a worker restart | Silent stop is indistinguishable from "no drops" |
+| B6 | Tab closed by the user mid-check | |
+| B7 | Redirect fires `complete` for the interstitial | |
+| B8 | Price client-renders after the 1500ms settle | The wait is still a guess |
+| A6 | Known blocker still opens a pointless tab | |
+| A9 | Site serves different HTML to fetch than to a browser | |
