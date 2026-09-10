@@ -1,19 +1,32 @@
-// Runs the real extractor against pages captured from the 15 test URLs.
+// Runs the real extractor against pages captured from a real browser.
+//
+// Capture them with the snippet in docs/TESTING.md: a live https page cannot
+// fetch() localhost, but a top-level form POST is a navigation rather than a
+// subresource, so Chrome allows it. Some sites refuse even that — REI sets a
+// CSP `form-action` — and those simply cannot be captured this way.
+//
+// One caveat worth holding on to. A DOMParser document has no layout, so the
+// extractor's `LIVE` checks are off: nothing is "hidden" and no style is
+// struck through. That makes this harness a pessimistic stand-in for the DOM
+// heuristic, because in a real tab those candidates would be filtered out. The
+// structured layers behave identically either way.
 const out = document.getElementById("out");
 const CASES = [
-  ["01-rei",           "https://www.rei.com/product/235244/rei-co-op-trailmade-rain-jacket-mens"],
-  ["02-uniqlo",        "https://www.uniqlo.com/us/en/products/E452738-000/00"],
-  ["03-patagonia",     "https://www.patagonia.com/product/mens-better-sweater-fleece-jacket/25528.html"],
+  ["20-walmart",       "https://www.walmart.com/ip/575389962"],
+  ["22-target",        "https://www.target.com/p/-/A-88429520"],
+  ["23-newegg",        "https://www.newegg.com/p/N82E16820147861"],
+  ["24-backcountry",   "https://www.backcountry.com/patagonia-better-sweater-fleece-jacket-mens"],
+  ["25-sephora",       "https://www.sephora.com/product/lip-sleeping-mask-P420652"],
+  ["26-on",            "https://www.on.com/en-us/products/cloud-5-3MD10420553/mens/shoes-3MD10422290"],
+  ["27-gap",           "https://www.gap.com/browse/product.do?pid=440760012"],
+  ["28-lego",          "https://www.lego.com/en-us/product/millennium-falcon-75375"],
+  ["29-etsy",          "https://www.etsy.com/listing/1030029805"],
+  ["30-uniqlo",        "https://www.uniqlo.com/us/en/products/E459565-000/00"],
+  ["31-wayfair",       "https://www.wayfair.com/furniture/pdp/sihoo-ergonomic-mesh-office-chair-w002291366.html"],
+  ["32-bhphoto",       "https://www.bhphotovideo.com/c/product/1667800-REG/sony_ilce_7m4_b_alpha_a7_iv_mirrorless.html"],
+  // Older captures, kept while their files are still around.
   ["04-zappos",        "https://www.zappos.com/p/mens-brooks-ghost-17/product/9993464"],
-  ["05-target",        "https://www.target.com/p/stanley-40-oz-stainless-steel-h2-0-flowstate-quencher-tumbler/-/A-88429520"],
-  ["06-walmart",       "https://www.walmart.com/ip/575389962"],
-  ["07-homedepot",     "https://www.homedepot.com/p/317987598"],
-  ["08-bestbuy",       "https://www.bestbuy.com/product/sony-wh-1000xm5-wireless-noise-cancelling-over-the-ear-headphones-black/J7XSRH5CXG"],
-  ["09-bhphoto",       "https://www.bhphotovideo.com/c/product/1667800-REG/sony_ilce_7m4_b_alpha_a7_iv_mirrorless.html"],
-  ["10-newegg",        "https://www.newegg.com/samsung-2tb-990-pro-nvme-2-0/p/N82E16820147861"],
   ["11-ikea",          "https://www.ikea.com/us/en/p/malm-bed-frame-white-s69931603/"],
-  ["12-wayfair",       "https://www.wayfair.com/furniture/pdp/sihoo-ergonomic-mesh-office-chair-w002291366.html"],
-  ["13-sephora",       "https://www.sephora.com/product/lip-sleeping-mask-P420652"],
   ["14-duluth",        "https://www.duluthpack.com/products/patagonia-womens-better-sweater-fleece-jacket"],
   ["15-patagoniabend", "https://www.patagoniabend.com/products/ms-better-sweater-j"]
 ];

@@ -434,9 +434,14 @@ async function checkAll() {
   const groups = groupByHost(due);
   let ok = 0, failed = 0, next = 0;
 
-  // Write after every item, not once at the end. A single throw part-way
+  // Commit after every item, not once at the end. A single throw part-way
   // through used to discard every reading the run had already earned, and a
   // long watchlist gives it plenty of chances to throw.
+  //
+  // Each commit lands on whatever is in storage at that moment, and only the
+  // fields a check owns. Writing the whole list back put the run's opening
+  // snapshot over the top of everything: delete a row while the run was going
+  // and it came straight back.
   async function lane() {
     while (next < groups.length) {
       const group = groups[next++];
@@ -450,7 +455,15 @@ async function checkAll() {
           item.lastError = (e && e.message) || "the check could not be completed";
           item.failCount = (item.failCount || 0) + 1;
         }
-        await Store.setItems(items);
+        // A commit that fails costs this item's reading, never the rest of the
+        // run. There is nowhere to record it on the item itself — writing to
+        // the item is the thing that just failed — so it goes to the worker
+        // console, which is where the other lifecycle failures surface.
+        try {
+          await Store.commitCheck(item);
+        } catch (e) {
+          console.warn("could not save the check for", item.url, e);
+        }
       }
     }
   }
@@ -459,7 +472,9 @@ async function checkAll() {
   for (let i = 0; i < Math.min(LANES, groups.length); i++) lanes.push(lane());
   await Promise.all(lanes);
 
-  await updateBadge(items);
+  // Read the list again for the badge. `items` is the snapshot the run opened
+  // with, and by now it can be several edits out of date.
+  await updateBadge();
   return { checked: due.length, ok, failed, skipped: items.length - due.length };
 }
 
@@ -470,8 +485,8 @@ async function checkOne(id) {
   const item = items.find((i) => i.id === id);
   if (!item) return false;
   await checkItem(item);
-  await Store.setItems(items);
-  await updateBadge(items);
+  await Store.commitCheck(item);
+  await updateBadge();
   return true;
 }
 

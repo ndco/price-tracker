@@ -7,8 +7,17 @@ http.createServer((q,s)=>{
     const name=path.basename(decodeURIComponent(q.url.slice(8)));
     const dest=path.join(ROOT,"fixtures","live",name);
     let body=""; q.on("data",c=>body+=c);
-    q.on("end",()=>{fs.writeFileSync(dest,body);
-      s.writeHead(200,{"Access-Control-Allow-Origin":"*"});s.end("saved "+body.length);});
+    q.on("end",()=>{
+      // A live https page cannot fetch() this origin — that is mixed content,
+      // and Chrome blocks it. A top-level form POST is a navigation, not a
+      // subresource, so it is allowed and is how a rendered page gets captured
+      // from a real browser. Those arrive urlencoded under `page`.
+      const form=/^page=/.test(body);
+      const html=form?decodeURIComponent(body.slice(5).replace(/\+/g," ")):body;
+      fs.mkdirSync(path.dirname(dest),{recursive:true});
+      fs.writeFileSync(dest,html);
+      s.writeHead(200,{"Access-Control-Allow-Origin":"*","Content-Type":"text/html"});
+      s.end("saved "+name+" ("+html.length+" bytes)");});
     return;
   }
   if(q.method==="OPTIONS"){s.writeHead(204,{"Access-Control-Allow-Origin":"*",

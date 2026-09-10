@@ -260,6 +260,76 @@ saying "this site needs a tab" simply vanishes. Rule writes are now serialized,
 and `recordFailure` computes its count inside that queue rather than outside it
 — otherwise two failures both read 1 and both write 2.
 
+## How often do we get the price right?
+
+Measured 2026-09-10. Rendered pages captured from a real browser into
+`fixtures/live/`, then read by the real extractor through `test/live.html`.
+Ground truth is the price shown on the page at the time, checked by hand.
+
+Sixteen captures. Four were not product pages at all — a bot wall (Wayfair), a
+Cloudflare challenge (B&H), a dead listing (Etsy), a 404 (Duluth) — and one was
+a stale URL that redirected to a homepage (on.com). Refusing all five is
+correct, so the honest denominator is the ten live product pages.
+
+| Outcome | Count | Notes |
+|---|---|---|
+| Correct price recorded | 7 | Backcountry, Gap, LEGO, Uniqlo, Zappos, IKEA, Walmart |
+| Wrong price recorded | 1 | Newegg — see GAP 4 |
+| Refused, but the page had a price | 2 | Target, Sephora |
+
+**Read that by confidence level, because that is what decides whether a number
+reaches history:**
+
+| Confidence | Readings | Correct | |
+|---|---|---|---|
+| high | 6 | 6 | 100% |
+| medium | 2 | 1 | 50% |
+| low | 1 | — | never recorded, by design |
+
+So: **80% of live product pages produced a reading, and 87% of those were
+right.** Every wrong price came in at medium confidence. Nothing at high
+confidence was wrong, and nothing at low confidence reached history.
+
+Ten pages is a small sample and the intervals around 6/6 and 1/2 are wide.
+Treat these as the shape of the problem, not as a rate to quote.
+
+The shape is clear enough to act on. The structured layers — JSON-LD, the
+Shopify endpoint, the price meta tag — are reliable, and they are the ones that
+earn "high". The DOM heuristic is where the wrong numbers come from, and it
+reports "medium", which `judge()` believes for a modest move.
+
+### GAP 4 — The heuristic ranks a variant selector above the product 🟠
+
+Newegg sells a 2TB SSD at $389.99 and offers a 1TB alternative in a capacity
+picker. The picker's markup reads `1TB | $239.99`, and the heuristic chose it:
+
+```
+23-newegg   239.99   heuristic   medium   (page sells at $389.99)
+```
+
+`CLAUDE.md` already records the earlier version of this trap — Newegg's
+capacity buttons carry `price-padding` and read `1TB`, which a naive parser
+read as `1`. The money-shape guard fixed that. This is the same trap wearing a
+real price: the guard passes it because `$239.99` is money, and nothing after
+that prefers the product over one of its alternatives.
+
+### GAP 5 — The buy control can anchor on a cross-sell 🟠
+
+Walmart's `buyBox-container` on the Instant Pot page currently holds a *T-fal*
+pressure cooker at $129.95, not the Instant Pot. Anchoring on the buy control
+would read the wrong product's price. The microdata layer answered first here
+and got it right, so nothing broke — but the buy-control landmark added for
+GAP 2 is less safe than it looked, and it should check that the region it found
+belongs to the page's own product.
+
+### GAP 6 — Some pages never render for an automated browser 🟡
+
+Target served empty price nodes for 38 seconds straight. Its own class names
+had changed since the previous run, and the price never arrived. Sephora
+likewise produced nothing from its capture. This is B8 with evidence: the
+1500 ms settle is a guess, and for some sites no amount of waiting helps
+because the page is being served differently.
+
 ## Still open
 
 | # | Gap | Why it matters |
