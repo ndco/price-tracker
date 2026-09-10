@@ -241,29 +241,67 @@
     return best;
   }
 
+  // Elements that might be naming the product. An `<h1>` usually is, but not
+  // always — Amazon's reads "Product summary presents key product information"
+  // and exists for screen readers, while the real title sits in a span.
+  const TITLE_SEL = 'h1,[itemprop="name"],#productTitle,[id*="productTitle" i],' +
+    '[data-testid*="product-title" i],[data-test*="product-title" i]';
+
+  // The heading the page agrees with. A document title is written to name the
+  // thing being sold, so the element whose text turns up inside it is the one
+  // naming the product. That single check tells Amazon's real title from its
+  // accessibility heading without knowing anything about Amazon.
+  function titleElement() {
+    const h1 = DOC.querySelector("h1");
+    const docTitle = String(DOC.title || "").toLowerCase();
+    if (!docTitle) return h1;
+    for (const el of DOC.querySelectorAll(TITLE_SEL)) {
+      const text = (el.textContent || "").trim();
+      if (text.length < 10 || text.length > 300) continue;
+      if (docTitle.includes(text.toLowerCase().slice(0, 60))) return el;
+    }
+    return h1;
+  }
+
+  function priceCount(el) {
+    return el && el.querySelectorAll ? el.querySelectorAll(PRICE_SEL).length : Infinity;
+  }
+
+  // Of two candidate regions, the one holding fewer prices is the one more
+  // likely to be about a single product.
+  function tighter(a, b) {
+    if (!a) return b;
+    if (!b) return a;
+    return priceCount(b) < priceCount(a) ? b : a;
+  }
+
   // Narrow the search to the region that describes THIS product, and say which
   // landmark anchored it — the ranking below measures distance from whichever
   // one actually found the region.
   function productScope() {
     const typed = DOC.querySelector('[itemtype*="Product" i]');
-    if (typed) return { root: typed, anchor: DOC.querySelector("h1") || typed };
+    if (typed) return { root: typed, anchor: titleElement() || typed };
 
-    // The title first: on a page built out of headings and sections it is the
-    // most direct statement of what the page is about, and every fixture we
-    // have relies on it.
-    const h1 = DOC.querySelector("h1");
-    const byTitle = h1 ? climbFrom(h1, 8) : null;
-    if (byTitle) return { root: byTitle, anchor: h1 };
-
-    // Nothing near the title. On a React storefront the price is nowhere near
-    // the heading, so look for the buy box instead. Walmart goes from 164
-    // price nodes across the page to 2 inside it.
+    // Two landmarks, and neither is reliable alone. The title is the most
+    // direct statement of what a page is about, and every fixture here leans
+    // on it. The buy control wins where the markup is too deep for the title
+    // to reach, as on a React storefront.
+    const title = titleElement();
+    const byTitle = title ? climbFrom(title, 8) : null;
     const buy = buyControl(DOC);
     const byBuy = buy ? climbFrom(buy, 10) : null;
-    if (byBuy) return { root: byBuy, anchor: buy };
+
+    // Take whichever found the tighter region rather than whichever was tried
+    // first. Climbing from Amazon's title lands on the whole product page —
+    // 358 of its 413 prices — and ranking by distance inside that is a
+    // lottery. The buy box is a fraction of the size.
+    const best = tighter(byTitle, byBuy);
+    if (best) {
+      return { root: best, anchor: best === byBuy && buy ? buy : (title || buy) };
+    }
 
     const fallback = DOC.querySelector("main") || DOC.body || DOC;
-    return { root: fallback, anchor: h1 || fallback };
+    return { root: fallback, anchor: title || fallback };
   }
 
   function productRoot() {

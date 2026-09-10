@@ -343,6 +343,52 @@ function skipped(name) {
   check("no money anywhere -> null",
         await extract(nothing, "https://shop.test/products/mystery-1234"), null);
 
+  // ---- when the <h1> is not the product title -------------------------------
+  // Amazon's h1 reads "Product summary presents key product information" and
+  // exists for screen readers; the real title is a span. Climbing from that h1
+  // reached the whole product page — 358 of its 413 price nodes — and ranking
+  // by distance inside that picked $83.99 off a page selling at $119.99.
+  log("<h2>pages whose h1 is not the title</h2>");
+
+  const decoys = ["83.99", "21.99", "29.99", "16.99", "47.50", "12.00", "9.99"]
+    .map((p) => `<div class="a-price"><span class="a-offscreen">$${p}</span></div>`).join("");
+
+  const amazonish = `<html><head>
+    <title>Shop.com: Heavy Duty Carbon Steel Microwave Stand, 2-Tier Adjustable</title>
+    </head><body><div id="dp">
+      <h1 class="a-sr-only">Product summary presents key product information. Keyboard shortcuts available.</h1>
+      <span id="productTitle">Heavy Duty Carbon Steel Microwave Stand, 2-Tier Adjustable</span>
+      <div class="sims">${decoys}</div>
+      <div id="buybox">
+        <div class="a-price apex-core-price">
+          <span class="a-offscreen">$119.99</span>
+          <span class="a-price-symbol">$</span><span class="a-price-whole">119.</span><span class="a-price-fraction">99</span>
+        </div>
+        <button type="button">Add to Cart</button>
+      </div>
+      <div class="more">${decoys}</div>
+    </div></body></html>`;
+
+  const az = await extract(amazonish, "https://shop.test/dp/B0H1PX5M1S/");
+  check("the price agrees with the buy box, not a cheaper decoy", az && az.price, 119.99);
+  check("no decoy from elsewhere on the page wins",
+        az && [83.99, 21.99, 29.99, 16.99, 47.50, 12.00, 9.99].indexOf(az.price) < 0, true);
+  check("the split whole/fraction spans are not read as prices",
+        az && [119, 99, 11999].indexOf(az.price) < 0, true);
+
+  // The same page with a title that genuinely names the product: behaviour
+  // must not change, because the title is still the better landmark.
+  const plain = `<html><head><title>Microwave Stand — Shop</title></head><body>
+    <div class="pdp">
+      <h1>Microwave Stand</h1>
+      <span class="price">$119.99</span>
+      <button type="button">Add to Cart</button>
+    </div>
+    <div class="sims">${decoys}</div>
+  </body></html>`;
+  const pl = await extract(plain, "https://shop.test/products/microwave-stand-1234");
+  check("an honest h1 still anchors the search", pl && pl.price, 119.99);
+
   log(`<h2 class="${fail ? "fail" : "pass"}">${pass} passed, ${fail} failed</h2>`);
   window.__RESULT__ = { pass, fail };
 })().catch(e => { log(`<div class="fail">HARNESS ERROR: ${e && e.message}</div>`);

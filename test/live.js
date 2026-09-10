@@ -12,6 +12,7 @@
 // structured layers behave identically either way.
 const out = document.getElementById("out");
 const CASES = [
+  ["40-amazon",        "https://www.amazon.com/Microwave-Adjustable-Organizer-Pull-Out-Appliance/dp/B0H1PX5M1S/"],
   ["20-walmart",       "https://www.walmart.com/ip/575389962"],
   ["22-target",        "https://www.target.com/p/-/A-88429520"],
   ["23-newegg",        "https://www.newegg.com/p/N82E16820147861"],
