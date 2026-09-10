@@ -7,14 +7,20 @@ const notifs = [];
 const badge = {};
 let listeners = [];
 
+// Real chrome.storage serializes what it stores, so a get never hands back a
+// reference the caller can mutate. Sharing references in a stub lets one
+// caller quietly edit another's data and still pass — the shape of every
+// lost-update bug.
+const copy = (v) => { try { return structuredClone(v); } catch (e) { return v; } };
+
 global.chrome = {
   storage: {
     local: {
-      get: async (k) => ({ [k]: mem[k] }),
+      get: async (k) => (mem[k] === undefined ? {} : { [k]: copy(mem[k]) }),
       set: async (o) => {
         const changes = {};
-        for (const k of Object.keys(o)) changes[k] = { newValue: o[k], oldValue: mem[k] };
-        Object.assign(mem, o);
+        for (const k of Object.keys(o)) changes[k] = { newValue: copy(o[k]), oldValue: copy(mem[k]) };
+        for (const k of Object.keys(o)) mem[k] = copy(o[k]);
         listeners.forEach((fn) => fn(changes, "local"));
       }
     },

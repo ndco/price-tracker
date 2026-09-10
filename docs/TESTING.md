@@ -102,6 +102,37 @@ so the listener race is reproducible:
 
 If a stub cannot express the failure you are worried about, fix the stub first.
 
+## Capturing a rendered page
+
+`test/live-fetch.js` only sees what a server hands a plain fetch, and four out
+of five real pages need a browser. To read what the extractor would actually
+get from a rendered page, capture it.
+
+A live `https://` page cannot `fetch()` `http://localhost` — that is mixed
+content, and Chrome blocks it. A **top-level form POST is a navigation**, not a
+subresource, so it is allowed. Start `node test/serve.js`, open the product
+page, and run this in its console:
+
+```js
+const f = document.createElement("form");
+f.method = "POST";
+f.action = "http://localhost:8731/upload/40-mysite.html";
+const i = document.createElement("textarea");
+i.name = "page";
+i.value = document.documentElement.outerHTML;
+f.appendChild(i); document.body.appendChild(f); f.submit();
+```
+
+Add the name and URL to `CASES` in `test/live.js`, then open
+`http://localhost:8731/test/live.html` to see the real extractor's verdict on
+every captured page at once.
+
+Two limits worth knowing. Some sites refuse the POST — REI sets a CSP
+`form-action` — and cannot be captured this way. And a `DOMParser` document has
+no layout, so the extractor's visibility and strikethrough checks are inert;
+the structured layers behave identically, but the DOM heuristic sees candidates
+a real tab would have filtered out.
+
 ## Adding a fixture
 
 A fixture earns its place by having broken something. Capture the page, put it

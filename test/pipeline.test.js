@@ -10,6 +10,13 @@ let tabsOpened = 0, fetches = [];
 let fetchImpl = async () => null;
 const notifs = [];
 
+// structuredClone refuses getters that throw, and one test deliberately uses
+// one to force a failure. Fall back to handing the value straight through when
+// it cannot be copied — the test that does this is not testing storage.
+function clone(v) {
+  try { return structuredClone(v); } catch (e) { return v; }
+}
+
 const TAB_ID = 7;
 let tabLoadMode = "afterListener";
 let tabsById = {};
@@ -18,10 +25,19 @@ const updateListeners = new Set();
 global.importScripts = (...files) => files.forEach((f) => require(DIR + f));
 
 global.chrome = {
+  // Real chrome.storage serializes everything it stores, so every get hands
+  // back a fresh copy. A stub that shares object references instead lets a
+  // caller mutate another caller's data by accident and call it a pass — which
+  // is exactly how a lost-update bug hides. Copy on the way in and out.
   storage: {
     local: {
-      get: async (k) => { const ks = Array.isArray(k) ? k : [k]; const o = {}; ks.forEach(x => o[x] = mem[x]); return o; },
-      set: async (o) => Object.assign(mem, o)
+      get: async (k) => {
+        const ks = Array.isArray(k) ? k : [k];
+        const o = {};
+        ks.forEach((x) => { if (mem[x] !== undefined) o[x] = clone(mem[x]); });
+        return o;
+      },
+      set: async (o) => { for (const k of Object.keys(o)) mem[k] = clone(o[k]); }
     },
     onChanged: { addListener() {} }
   },
@@ -512,6 +528,77 @@ function reset() {
   learned = (await Rules.all()).learned;
   ok("three failures counted as three", learned["rd.test"].fails === 3);
   ok("and that retires the cheap path", learned["rd.test"].needsTab === true);
+
+  // ---- edits made while a run is going ---------------------------------------
+  // CHECK NOW starts a run and leaves the popup open, so editing a row while
+  // it says CHECKING… is the ordinary path, not an edge case. The run used to
+  // write its opening snapshot back over the top of every such edit.
+  section("live edits: a row deleted mid-run stays deleted");
+  reset();
+  watch = watchFetches(15);
+  let live = seed([
+    "https://p1.test/products/1", "https://p2.test/products/1",
+    "https://p3.test/products/1", "https://p4.test/products/1",
+    "https://p5.test/products/1", "https://p6.test/products/1"
+  ]);
+  await Store.setItems(live);
+  const doomed = live[5].id;
+  let running = checkAll();
+  await new Promise((r) => setTimeout(r, 20));
+  await Store.removeItem(doomed);
+  await running;
+  let after = await Store.getItems();
+  ok("the delete stuck", after.every((i) => i.id !== doomed));
+  ok("nothing else was lost", after.length === 5);
+
+  section("live edits: a target set mid-run survives");
+  reset();
+  // Nine stores in three lanes, 40ms each, so commits land in waves at roughly
+  // 40, 80 and 120ms. Edit the *first* item at 60ms: its own check is already
+  // committed, and on the old code the wave behind it wrote the run's opening
+  // snapshot straight over the edit.
+  watch = watchFetches(40);
+  live = seed([...Array(9)].map((_, i) => `https://q${i}.test/products/1`));
+  await Store.setItems(live);
+  const retargeted = live[0].id;
+  running = checkAll();
+  await new Promise((r) => setTimeout(r, 60));
+  await Store.updateItem(retargeted, { target: 12.5, alertOn: "target", paused: true });
+  await running;
+  after = await Store.getItems();
+  const edited = after.find((i) => i.id === retargeted);
+  ok("the target survived the run", edited.target === 12.5);
+  ok("so did the pause", edited.paused === true);
+  ok("and the check still recorded its price", edited.lastPrice === 50);
+
+  section("live edits: a check only writes what a check owns");
+  reset();
+  const one = Store.makeItem({ url: "https://solo.test/products/1", title: "Original",
+    price: 50, currency: "USD" }, 40, { confirmed: true });
+  await Store.setItems([one]);
+  // A finished check, carrying a reading plus fields it has no business
+  // writing back — the values it read when the run started.
+  const finished = JSON.parse(JSON.stringify(one));
+  finished.lastPrice = 31;
+  finished.lastChecked = Date.now();
+  finished.title = "Original";
+  finished.target = 40;
+  // Meanwhile the user renamed it and moved the target.
+  await Store.updateItem(one.id, { title: "Renamed by hand", target: 25 });
+  await Store.commitCheck(finished);
+  const merged = (await Store.getItems())[0];
+  ok("the reading landed", merged.lastPrice === 31);
+  ok("the hand-edited title stands", merged.title === "Renamed by hand");
+  ok("so does the hand-edited target", merged.target === 25);
+
+  section("live edits: committing a deleted item does not resurrect it");
+  reset();
+  const ghost = Store.makeItem({ url: "https://ghost.test/products/1", title: "Gone",
+    price: 50, currency: "USD" }, null, { confirmed: true });
+  await Store.setItems([ghost]);
+  await Store.removeItem(ghost.id);
+  ok("commit refuses a missing item", (await Store.commitCheck(ghost)) === null);
+  ok("the list is still empty", (await Store.getItems()).length === 0);
 
   console.log("\n" + pass + " passed, " + fail + " failed");
   process.exit(fail ? 1 : 0);

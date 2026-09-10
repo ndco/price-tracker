@@ -218,19 +218,74 @@
     await chrome.storage.local.set({ items });
   }
 
+  // Reading the whole list, changing one entry and writing the whole list back
+  // is only safe if nobody else does it at the same time. Three checks now run
+  // at once, so they queue behind each other here.
+  //
+  // This cannot help across contexts — the popup is a separate page with its
+  // own copy of this file, and `chrome.storage` has no transaction. What it
+  // does is shrink the window from "the whole run" to "one write", and
+  // `commitCheck` below closes the rest.
+  let writeQueue = Promise.resolve();
+
+  function serialized(work) {
+    const next = writeQueue.then(work, work);
+    writeQueue = next.then(noop, noop);
+    return next;
+  }
+
+  function noop() {}
+
   async function updateItem(id, patch) {
-    const items = await getItems();
-    const it = items.find((i) => i.id === id);
-    if (!it) return null;
-    Object.assign(it, typeof patch === "function" ? patch(it) : patch);
-    await setItems(items);
-    return it;
+    return serialized(async () => {
+      const items = await getItems();
+      const it = items.find((i) => i.id === id);
+      if (!it) return null;
+      Object.assign(it, typeof patch === "function" ? patch(it) : patch);
+      await setItems(items);
+      return it;
+    });
   }
 
   async function removeItem(id) {
-    const items = (await getItems()).filter((i) => i.id !== id);
-    await setItems(items);
-    return items;
+    return serialized(async () => {
+      const items = (await getItems()).filter((i) => i.id !== id);
+      await setItems(items);
+      return items;
+    });
+  }
+
+  // What a check is allowed to write. Everything else on an item belongs to
+  // the person using it — the target, the title, whether it is paused — and a
+  // check that has been running for half a minute must not put back the values
+  // it read when it started.
+  const CHECK_FIELDS = [
+    "lastChecked", "lastOk", "lastError", "failCount",
+    "identityMismatch", "suspect", "pendingPrice", "pendingSince", "pendingKind",
+    "lastPrice", "list", "currency", "image", "stock", "sku", "color", "size",
+    "history", "notified", "notifiedRise", "watch", "muteUntilBelow", "snoozeKind"
+  ];
+
+  // Write one finished check onto whatever is in storage *now*, rather than
+  // onto the snapshot the run started from.
+  //
+  // Two things this gets right that a whole-list write could not. An item
+  // deleted while it was being checked stays deleted, instead of reappearing
+  // when the run catches up. And an edit made during the check — a new target,
+  // a pause — survives, because only the fields above are copied across.
+  async function commitCheck(checked) {
+    if (!checked || !checked.id) return null;
+    return serialized(async () => {
+      const items = await getItems();
+      const at = items.findIndex((i) => i.id === checked.id);
+      if (at < 0) return null; // deleted mid-check; let it stay deleted
+      const fresh = items[at];
+      for (const key of CHECK_FIELDS) {
+        if (key in checked) fresh[key] = checked[key];
+      }
+      await setItems(items);
+      return fresh;
+    });
   }
 
   // A tracked item is due for a check unless it is paused, snoozed, or has
@@ -482,7 +537,7 @@
   root.Store = {
     SCHEMA_VERSION, MAX_FAILS, DEFAULT_SETTINGS, SNOOZE, DAY,
     getSettings, setSettings,
-    getItems, setItems, updateItem, removeItem,
+    getItems, setItems, updateItem, removeItem, commitCheck, CHECK_FIELDS,
     normalizeItem, makeItem, isCheckable, sellerFromUrl, newId,
     productKey, sameProduct, historyPoint, identityMismatch,
     CSV_COLUMNS, toCsv, parseCsv, itemsFromText, mergeItems, importText
