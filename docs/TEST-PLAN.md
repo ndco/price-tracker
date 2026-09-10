@@ -98,6 +98,8 @@ Marked ✅ covered, ⚠️ partly covered, ❌ not covered.
 | C12 | Canonical names a different variant than the URL asked for | extract | ✅ |
 | C13 | Ambiguous variant page is not mistaken for a shelf | extract | ✅ |
 | C11 | Sold out; watched for return | pipeline | ✅ |
+| C17 | The page's `h1` is not the product title | extract | ✅ |
+| C18 | Title landmark lands on the whole page, not the product | extract | ✅ |
 
 ### D. Judgement — should this reading be believed
 
@@ -312,6 +314,32 @@ capacity buttons carry `price-padding` and read `1TB`, which a naive parser
 read as `1`. The money-shape guard fixed that. This is the same trap wearing a
 real price: the guard passes it because `$239.99` is money, and nothing after
 that prefers the product over one of its alternatives.
+
+### GAP 7 — The `h1` is not always the title ✅ FIXED
+
+Reported from real use: an Amazon listing selling at **$119.99** was tracked at
+the wrong price. The page publishes **no JSON-LD, no price meta tag and no
+microdata**, so everything falls to the DOM heuristic — and the heuristic's
+only landmark was the `<h1>`.
+
+Amazon's `<h1>` reads *"Product summary presents key product information.
+Keyboard shortcuts available."* It is there for screen readers. The real title
+is a `<span>`. Climbing from that heading reached `#dp`, the whole product
+page, holding **358 of its 413 price nodes**, and ranking by distance inside
+that is a lottery. It returned **$83.99**.
+
+Two changes, and the second is the general one.
+
+**The landmark is now the heading the page agrees with.** A document title is
+written to name the thing being sold, so the element whose text turns up inside
+`document.title` is the one naming the product. Amazon's real title passes that
+test and its accessibility heading does not — without the extractor knowing
+anything about Amazon.
+
+**Landmarks compete instead of taking turns.** The title used to win simply by
+being tried first, even when the region it found was the entire page. Now the
+title climb and the buy-control climb both run, and whichever found the tighter
+region wins. Amazon drops from 82 candidates to 26 and reads $119.99.
 
 ### GAP 5 — The buy control can anchor on a cross-sell 🟠
 
